@@ -1,5 +1,6 @@
 #include "loopback_entity.h"
 
+#include <chrono>
 #include <cstring>
 #include <functional>
 
@@ -283,6 +284,33 @@ void LoopbackEntity::handle_routing(const std::shared_ptr<Client> &client,
     asio::write(client->sock, asio::buffer(frame), ignored);
 }
 
+void LoopbackEntity::send_diagnostic_uds(const std::shared_ptr<Client> &client,
+                                         const uint8_t *addrPrefix,
+                                         const std::vector<uint8_t> &uds,
+                                         uint32_t delayMs)
+{
+    std::vector<uint8_t> body;
+    body.assign(addrPrefix, addrPrefix + 4);
+    body.insert(body.end(), uds.begin(), uds.end());
+    const auto frame = Encode(0x8001, body.data(), static_cast<uint32_t>(body.size()));
+    if (delayMs == 0)
+    {
+        asio::error_code ignored;
+        asio::write(client->sock, asio::buffer(frame), ignored);
+        return;
+    }
+    auto timer = std::make_shared<asio::steady_timer>(io_);
+    timer->expires_after(std::chrono::milliseconds(delayMs));
+    timer->async_wait([client, frame, timer](const asio::error_code &ec) {
+        if (ec || !client->sock.is_open())
+        {
+            return;
+        }
+        asio::error_code ignored;
+        asio::write(client->sock, asio::buffer(frame), ignored);
+    });
+}
+
 void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
                                        const uint8_t *payload,
                                        uint32_t payloadLen)
@@ -325,24 +353,56 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
         return;
     }
 
-    std::vector<uint8_t> resp;
-    resp.assign(addrPrefix, addrPrefix + 4);
+    for (uint32_t i = 0; i < options_.udsPendingCount; ++i)
+    {
+        const std::vector<uint8_t> pending{0x7F, uds[0], 0x78};
+        send_diagnostic_uds(client, addrPrefix, pending, 0);
+    }
+    if (options_.udsDropAfterPending)
+    {
+        return;
+    }
+    const uint32_t finalDelay =
+        options_.udsPendingCount > 0 ? options_.udsPendingDelayMs : 0;
+
+    std::vector<uint8_t> udsResp;
     if (options_.udsNrc != 0)
     {
-        resp.push_back(0x7F);
-        resp.push_back(uds[0]);
-        resp.push_back(options_.udsNrc);
+        udsResp = {0x7F, uds[0], options_.udsNrc};
     }
-    else
+    else if (uds[0] == 0x22 && (options_.didData != nullptr || options_.rejectUnknownDid))
     {
-        resp.push_back(static_cast<uint8_t>(uds[0] + 0x40));
-        if (udsLen > 1)
+        if (udsLen < 3)
         {
-            resp.insert(resp.end(), uds + 1, uds + udsLen);
+            udsResp = {0x7F, 0x22, 0x13};
+        }
+        else
+        {
+            const uint16_t did = ReadU16Be(uds + 1);
+            if (options_.didData != nullptr && did == options_.supportedDid)
+            {
+                udsResp.push_back(0x62);
+                udsResp.push_back(uds[1]);
+                udsResp.push_back(uds[2]);
+                const char *data = options_.didData;
+                const std::size_t n = std::strlen(data);
+                udsResp.insert(udsResp.end(), data, data + n);
+            }
+            else if (options_.rejectUnknownDid)
+            {
+                udsResp = {0x7F, 0x22, 0x31};
+            }
         }
     }
 
-    const auto frame = Encode(0x8001, resp.data(), static_cast<uint32_t>(resp.size()));
-    asio::error_code ignored;
-    asio::write(client->sock, asio::buffer(frame), ignored);
+    if (udsResp.empty())
+    {
+        udsResp.push_back(static_cast<uint8_t>(uds[0] + 0x40));
+        if (udsLen > 1)
+        {
+            udsResp.insert(udsResp.end(), uds + 1, uds + udsLen);
+        }
+    }
+
+    send_diagnostic_uds(client, addrPrefix, udsResp, finalDelay);
 }

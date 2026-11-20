@@ -34,6 +34,14 @@ public:
         bool sendDiagnosticAck = false;
         uint8_t diagnosticNackCode = 0x02; // ISO: unknown target address
         uint8_t udsNrc = 0;                // non-zero: reply 0x7F + SID + NRC
+        // Fake 0x22 ReadDID data for tests (not a plant / OEM DID).
+        // When didData is set, a matching supportedDid returns 0x62 + DID + data.
+        uint16_t supportedDid = 0x0001;
+        const char *didData = nullptr;
+        bool rejectUnknownDid = false; // unknown 0x22 DID -> NRC 0x31
+        uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
+        bool udsDropAfterPending = false;
+        uint32_t udsPendingDelayMs = 20;
     };
 
     LoopbackEntity();
@@ -61,6 +69,10 @@ private:
     void handle_diagnostic(const std::shared_ptr<Client> &client,
                            const uint8_t *payload,
                            uint32_t payloadLen);
+    void send_diagnostic_uds(const std::shared_ptr<Client> &client,
+                             const uint8_t *addrPrefix,
+                             const std::vector<uint8_t> &uds,
+                             uint32_t delayMs);
 
     Options options_;
     asio::io_context io_;
