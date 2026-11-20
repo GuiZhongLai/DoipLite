@@ -394,9 +394,46 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
             }
         }
     }
+    else if (uds[0] == 0x10 &&
+             (options_.rejectUnknownSession || options_.sessionIncludeTiming))
+    {
+        if (udsLen < 2)
+        {
+            udsResp = {0x7F, 0x10, 0x13};
+        }
+        else
+        {
+            const uint8_t requested = uds[1];
+            const uint8_t type = static_cast<uint8_t>(requested & 0x7F);
+            const bool suppress = (requested & 0x80u) != 0;
+            if (options_.rejectUnknownSession &&
+                type != static_cast<uint8_t>(options_.supportedSession & 0x7F))
+            {
+                // NRC is always returned, even when suppressPositiveResponse is set.
+                udsResp = {0x7F, 0x10, 0x12};
+            }
+            else if (!suppress)
+            {
+                udsResp = {0x50, requested};
+                if (options_.sessionIncludeTiming)
+                {
+                    uint8_t timing[4];
+                    WriteU16Be(timing, options_.sessionP2);
+                    WriteU16Be(timing + 2, options_.sessionP2Star);
+                    udsResp.insert(udsResp.end(), timing, timing + 4);
+                }
+            }
+            // suppress + accepted type: intentional silence (no positive response).
+        }
+    }
 
     if (udsResp.empty())
     {
+        // Default 0x10 echo also honors suppressPositiveResponse bit7.
+        if (uds[0] == 0x10 && udsLen >= 2 && (uds[1] & 0x80u) != 0)
+        {
+            return;
+        }
         udsResp.push_back(static_cast<uint8_t>(uds[0] + 0x40));
         if (udsLen > 1)
         {

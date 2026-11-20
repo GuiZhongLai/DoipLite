@@ -2,7 +2,7 @@
 
 DoipLite 是一个轻量级 C++ 库，用于在工控机上通过以太网做 **DoIP**（ISO 13400-2 通用部分）诊断传输，并在其上发送 **UDS**（ISO 14229）请求。核心库不依赖 Qt。
 
-当前已实现：**M1**（UDP 车辆发现、TCP 诊断连接、路由激活，以及 `doiplite-cli` 的 `discover` / `activate`），DoIP 诊断消息托运（`DoipLiteSendUds`，payload type 0x8001 / 0x8002 ACK / 0x8003 NACK），以及 **读版本**（`UdsReadDataByIdentifier` / CLI `read-version`，UDS 0x22；DID 来自调用参数或配置，库不提供默认值）。刷写仍返回 `DOIPLITE_ERR_NOT_IMPLEMENTED`。
+当前已实现：**M1**（UDP 车辆发现、TCP 诊断连接、路由激活，以及 `doiplite-cli` 的 `discover` / `activate`），DoIP 诊断消息托运（`DoipLiteSendUds`，payload type 0x8001 / 0x8002 ACK / 0x8003 NACK），以及 **读版本**（`UdsReadDataByIdentifier` / CLI `read-version`，UDS 0x22；DID 来自调用参数或配置，库不提供默认值），以及 **会话切换**（`UdsDiagnosticSessionControl` / CLI `session`，UDS 0x10；会话类型来自调用参数或配置，库不提供默认值，也不默认编程会话）。刷写仍返回 `DOIPLITE_ERR_NOT_IMPLEMENTED`。
 
 本库只实现通用 ISO 13400-2 行为，不包含厂商/OEM 私有扩展。逻辑地址、激活类型、协议版本等均由调用参数或配置传入，库代码不写入现场地址或密钥。
 
@@ -18,8 +18,8 @@ DoipLite 是一个轻量级 C++ 库，用于在工控机上通过以太网做 **
 ## 路线图
 
 1. **M1**：UDP 车辆发现、TCP 诊断连接、路由激活；命令行工具在工控机上跑通（本仓库当前范围）
-2. **M2**：`DoipLiteSendUds` 诊断消息托运（已实现）+ `UdsReadDataByIdentifier` 读取一个版本 DID（已实现；DID 来自配置或参数，库不提供默认值）
-3. **M3**：传包/升级状态机（会话、擦除、下载、传输、退出、复位）；安全访问只走回调
+2. **M2**：`DoipLiteSendUds` 诊断消息托运（已实现）+ `UdsReadDataByIdentifier` 读取一个版本 DID（已实现；DID 来自配置或参数，库不提供默认值）+ `UdsDiagnosticSessionControl` 会话切换（已实现；子功能来自配置或参数，库不提供默认值）
+3. **M3**：传包/升级状态机（擦除、下载、传输、退出、复位）；安全访问只走回调
 4. **M4**：Qt 作业界面（**不在本仓库**，只链接本库）
 5. **M5**：与服务器做 HTTPS/REST 版本比对（非第一优先）
 
@@ -52,13 +52,14 @@ ctest --test-dir build --output-on-failure
 ./build/doiplite-cli discover --broadcast 127.0.0.1 --port <port> --timeout-ms 1000
 ./build/doiplite-cli activate --ip 127.0.0.1 --port <port> --tester-addr 0x0E00
 ./build/doiplite-cli read-version --ip 127.0.0.1 --port <port> --tester-addr 0x0E00 --did 0x0001
+./build/doiplite-cli session --ip 127.0.0.1 --port <port> --tester-addr 0x0E00 --session 0x01
 ```
 
-回环模拟器会对示例 DID `0x0001` 返回可打印的假版本字符串 `SIM-1.0`（仅供本地联调，不是现场 DID）。
+回环模拟器会对示例 DID `0x0001` 返回可打印的假版本字符串 `SIM-1.0`（仅供本地联调，不是现场 DID）。默认模拟器对 UDS 0x10 回显 `0x50` 与请求的子功能；测试中也可配置仅接受某一会话类型，或附带示例 P2/P2* 时序参数。
 
 ## 配置与密钥
 
-逻辑地址、版本 DID、现场 IP 等**不要**写进库代码，通过配置文件或 API 参数传入。`examples/config/example.conf` 只是本地回环示例，请换成你自己的值，且不要把真实现场配置提交到本仓库。
+逻辑地址、版本 DID、会话类型、现场 IP 等**不要**写进库代码，通过配置文件或 API 参数传入。`examples/config/example.conf` 只是本地回环示例，请换成你自己的值，且不要把真实现场配置提交到本仓库。
 
 UDS 安全访问的种子—密钥算法不在本库实现，请在调用方注册 `DoipLiteSeedKeyFn`。详见 [SECURITY.md](SECURITY.md)。
 
@@ -70,14 +71,15 @@ UDS 安全访问的种子—密钥算法不在本库实现，请在调用方注�
 - `discover`：发送车辆识别请求并收集应答，打印每个实体的 IP 与逻辑地址；至少发现一台时退出 0，超时或网络错误则以非 0 退出并给出原因
 - `activate`：对指定 IPv4/端口建立 TCP 连接并做路由激活；成功退出 0，DoIP NACK / 超时 / 网络错误则以非 0 退出（NACK 会附带响应码）
 - `read-version`：对指定 IPv4/端口做路由激活后，发送 UDS 0x22 读取版本 DID。DID 必须由 `--did` 或配置项 `version_did` 提供，库不提供默认 DID。成功时打印原始 UDS 应答与数据记录的十六进制；若数据为可打印文本，同时打印版本字符串，退出 0。超时、DoIP NACK、UDS NRC 或未提供 DID 时以非 0 退出并给出原因
+- `session`：对指定 IPv4/端口做路由激活后，发送 UDS 0x10 DiagnosticSessionControl。会话类型必须由 `--session` 或配置项 `session_type` 提供，库不提供默认会话，CLI 也不会默认进入编程会话。成功时打印原始 UDS 应答（`0x50` + 子功能，以及若存在的 P2/P2*），退出 0。超时、DoIP NACK、UDS NRC 或未提供会话类型时以非 0 退出并给出原因
 
-常用参数（也可写入 `--config` 文件，命令行优先）：`--ip`、`--port`、`--broadcast`、`--tester-addr`、`--activation-type`、`--timeout-ms`、`--did`（配置键 `version_did`）。
+常用参数（也可写入 `--config` 文件，命令行优先）：`--ip`、`--port`、`--broadcast`、`--tester-addr`、`--activation-type`、`--timeout-ms`、`--did`（配置键 `version_did`）、`--session`（配置键 `session_type`）。
 
-默认发现目标为有限广播 `255.255.255.255:13400`，也支持单播（例如 `127.0.0.1`）。未指定测试仪逻辑地址时，`activate` 使用 **0x0E00** 作为示例默认值（ISO 13400 外部测试设备地址段 `0x0E00–0x0FFF` 的起始值，**不是**现场地址）；请按你自己的测试仪地址覆盖。激活类型默认 `0x00`（ISO 默认激活）。
+默认发现目标为有限广播 `255.255.255.255:13400`，也支持单播（例如 `127.0.0.1`）。未指定测试仪逻辑地址时，`activate`、`read-version` 与 `session` 使用 **0x0E00** 作为示例默认值（ISO 13400 外部测试设备地址段 `0x0E00–0x0FFF` 的起始值，**不是**现场地址）；请按你自己的测试仪地址覆盖。激活类型默认 `0x00`（ISO 默认激活）。
 
 库在发现时从临时端口发出请求并收集应答，不强制绑定 13400，因此不会主动监听车辆主动公告（Vehicle Announcement）；向已配置地址发送识别请求即可。
 
-扩展 API：`DoipLiteDiscoverEx`（可指定目的 IPv4 与 UDP 端口）、`DoipLiteRoutingActivationEx`（可指定超时）、`DoipLiteLastDoipCode` / `DoipLiteEntityAddress`。`DoipLiteSendUds` 在已激活会话上发送 0x8001 并等待 UDS 应答；0x8003 / 通用 NACK 的代码可通过 `DoipLiteLastDoipCode` 读取。未连接或尚未路由激活时返回 `DOIPLITE_ERR_NETWORK`；`timeoutMs` 为 0 时使用默认 2000ms。收到 UDS NRC `0x78`（response pending）时继续等待最终应答，直到本次超时。`UdsReadDataByIdentifier` 只通过 `DoipLiteSendUds` 发送 0x22，不自行组装 DoIP 头；成功时写出 DID 之后的数据记录。发送使用协议版本 `0x02` / `0xFD`，接收兼容 `0x01`、`0x02`、`0x03` 与识别请求常见的 `0xFF`。
+扩展 API：`DoipLiteDiscoverEx`（可指定目的 IPv4 与 UDP 端口）、`DoipLiteRoutingActivationEx`（可指定超时）、`DoipLiteLastDoipCode` / `DoipLiteEntityAddress`。`DoipLiteSendUds` 在已激活会话上发送 0x8001 并等待 UDS 应答；0x8003 / 通用 NACK 的代码可通过 `DoipLiteLastDoipCode` 读取。未连接或尚未路由激活时返回 `DOIPLITE_ERR_NETWORK`；`timeoutMs` 为 0 时使用默认 2000ms。收到 UDS NRC `0x78`（response pending）时继续等待最终应答，直到本次超时。`UdsReadDataByIdentifier` 只通过 `DoipLiteSendUds` 发送 0x22，不自行组装 DoIP 头；成功时写出 DID 之后的数据记录。`UdsDiagnosticSessionControl` 同样只通过 `DoipLiteSendUds` 发送 0x10；成功时写出完整 `0x50` 应答（含子功能及可选 P2/P2*）。子功能 bit7（suppressPositiveResponse）置位时，在超时内等待可能的 NRC；对端静默则视为成功且不关闭 TCP。CLI 的 `--session` / `session_type` 在收窄为 8 位前校验完整宽度，过大的值不会截断成其它子功能。发送使用协议版本 `0x02` / `0xFD`，接收兼容 `0x01`、`0x02`、`0x03` 与识别请求常见的 `0xFF`。
 
 ## 许可证
 

@@ -1,5 +1,6 @@
 #include "doiplite/doiplite.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -23,11 +24,13 @@ struct Options
     uint16_t activationType = kDefaultActivationType;
     uint32_t timeoutMs = DOIPLITE_DEFAULT_TIMEOUT_MS;
     uint16_t did = 0;
+    uint8_t sessionType = 0;
     bool havePort = false;
     bool haveTesterAddr = false;
     bool haveActivationType = false;
     bool haveTimeout = false;
     bool haveDid = false;
+    bool haveSessionType = false;
 };
 
 void printHelp()
@@ -40,16 +43,18 @@ void printHelp()
         "  doiplite-cli discover  [options]\n"
         "  doiplite-cli activate  [options]\n"
         "  doiplite-cli read-version [options]\n"
+        "  doiplite-cli session [options]\n"
         "\n"
         "Options:\n"
         "  --config <path>           Load key=value settings (flags override file)\n"
-        "  --ip <ipv4>               Entity IPv4 address (activate)\n"
+        "  --ip <ipv4>               Entity IPv4 address (activate / read-version / session)\n"
         "  --broadcast <ipv4>        Discover destination (default: 255.255.255.255)\n"
         "  --port <n>                UDP/TCP port (default: 13400)\n"
         "  --tester-addr <addr>      Tester logical address (hex 0x0E00 or decimal)\n"
         "  --activation-type <n>     Routing activation type (default: 0x00 ISO default)\n"
         "  --timeout-ms <n>          I/O timeout in milliseconds (default: 2000)\n"
         "  --did <id>                Version DID for read-version (hex 0x0001 or decimal)\n"
+        "  --session <n>             Session type / sub-function for session (hex 0x01 or decimal)\n"
         "\n"
         "discover prints the IP and logical address of each responding entity and\n"
         "exits 0 if at least one is found. activate opens a TCP diagnostic connection\n"
@@ -62,7 +67,14 @@ void printHelp()
         "also prints the version string. Exit 0 on success. Timeout, DoIP NACK, UDS\n"
         "NRC, or a missing DID exits non-zero with a reason.\n"
         "\n"
-        "If --tester-addr / tester_address is omitted, activate and read-version use\n"
+        "session opens a TCP connection, performs routing activation, and sends UDS 0x10\n"
+        "DiagnosticSessionControl. The session type must come from --session or\n"
+        "session_type in the config file; there is no library default and the CLI does\n"
+        "not assume a programming session. On success it prints the raw UDS response\n"
+        "(0x50 + sub-function, and P2/P2* if present). Exit 0 on success. Timeout,\n"
+        "DoIP NACK, UDS NRC, or a missing session type exits non-zero with a reason.\n"
+        "\n"
+        "If --tester-addr / tester_address is omitted, activate, read-version and session\n"
         "0x0E00 as an example default from the ISO 13400 external test equipment range.\n"
         "Replace it with your own tester address; it is not a field value. Do not\n"
         "hard-code plant IPs, VINs, or secrets. See examples/config/example.conf.\n",
@@ -80,7 +92,10 @@ std::string trim(std::string s)
     return s.substr(begin, end - begin + 1);
 }
 
-bool parseU32(const std::string &text, uint32_t *out)
+// Parse a full-width unsigned value first, then reject anything above max
+// before narrowing. This prevents e.g. 0x100000002 from becoming 0x02 after
+// a uint32_t truncate on platforms where unsigned long is wider than 32 bits.
+bool parseUnsignedMax(const std::string &text, unsigned long max, unsigned long *out)
 {
     if (!out || text.empty())
     {
@@ -88,8 +103,24 @@ bool parseU32(const std::string &text, uint32_t *out)
     }
     char *end = nullptr;
     const bool hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    errno = 0;
     const unsigned long value = std::strtoul(text.c_str(), &end, hex ? 16 : 10);
-    if (!end || *end != '\0')
+    if (errno == ERANGE || !end || end == text.c_str() || *end != '\0')
+    {
+        return false;
+    }
+    if (value > max)
+    {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+bool parseU32(const std::string &text, uint32_t *out)
+{
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFFFFFFFul, &value))
     {
         return false;
     }
@@ -99,12 +130,23 @@ bool parseU32(const std::string &text, uint32_t *out)
 
 bool parseU16(const std::string &text, uint16_t *out)
 {
-    uint32_t v = 0;
-    if (!parseU32(text, &v) || v > 0xffffu)
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFFFul, &value))
     {
         return false;
     }
-    *out = static_cast<uint16_t>(v);
+    *out = static_cast<uint16_t>(value);
+    return true;
+}
+
+bool parseU8(const std::string &text, uint8_t *out)
+{
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFul, &value))
+    {
+        return false;
+    }
+    *out = static_cast<uint8_t>(value);
     return true;
 }
 
@@ -168,6 +210,16 @@ bool applyKey(Options *opt, const std::string &key, const std::string &value, st
             return false;
         }
         opt->haveDid = true;
+        return true;
+    }
+    if (key == "session_type" || key == "session")
+    {
+        if (value.empty() || !parseU8(value, &opt->sessionType))
+        {
+            *err = "invalid session_type";
+            return false;
+        }
+        opt->haveSessionType = true;
         return true;
     }
     // Unknown keys (e.g. entity_address) are ignored.
@@ -252,6 +304,11 @@ void mergeFlags(Options *opt, const Options &flags)
     {
         opt->did = flags.did;
         opt->haveDid = true;
+    }
+    if (flags.haveSessionType)
+    {
+        opt->sessionType = flags.sessionType;
+        opt->haveSessionType = true;
     }
 }
 
@@ -497,6 +554,112 @@ int cmdReadVersion(const Options &opt)
     return 0;
 }
 
+
+int cmdSession(const Options &opt)
+{
+    if (opt.ip.empty())
+    {
+        std::fputs("doiplite-cli: session requires --ip or config ip\n", stderr);
+        return 2;
+    }
+    if (!opt.haveSessionType)
+    {
+        std::fputs("doiplite-cli: session requires --session or config session_type\n", stderr);
+        return 2;
+    }
+
+    const uint16_t port = opt.havePort ? opt.port : DOIPLITE_DEFAULT_TCP_PORT;
+    DoipLiteSession *session = DoipLiteOpen(opt.ip.c_str(), port);
+    if (!session)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: session failed: invalid_arg (cannot open %s:%u)\n",
+                     opt.ip.c_str(),
+                     static_cast<unsigned>(port));
+        return 2;
+    }
+
+    DoipLiteStatus st = DoipLiteRoutingActivationEx(
+        session, opt.testerAddr, opt.activationType, nullptr, 0, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: session failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    uint8_t buf[64];
+    uint32_t len = 0;
+    st = UdsDiagnosticSessionControl(
+        session, opt.sessionType, buf, sizeof(buf), &len, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: session failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        else if (st == DOIPLITE_ERR_UDS_NRC)
+        {
+            if (len >= 3)
+            {
+                std::fprintf(stderr, " (nrc 0x%02X)", buf[2]);
+            }
+            else if (len > 0)
+            {
+                std::fprintf(stderr, " (");
+                for (uint32_t i = 0; i < len; ++i)
+                {
+                    if (i > 0)
+                    {
+                        std::fputc(' ', stderr);
+                    }
+                    std::fprintf(stderr, "0x%02X", buf[i]);
+                }
+                std::fputc(')', stderr);
+            }
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    std::printf("session ok type=0x%02X\n", static_cast<unsigned>(opt.sessionType));
+    std::fputs("  uds=", stdout);
+    if (len == 0)
+    {
+        std::fputs("(empty)", stdout);
+    }
+    else
+    {
+        printHexBytes(buf, len);
+    }
+    std::fputc('\n', stdout);
+    if (len >= 2)
+    {
+        std::printf("  session_type=0x%02X\n", static_cast<unsigned>(buf[1]));
+    }
+    if (len >= 6)
+    {
+        const unsigned p2 = (static_cast<unsigned>(buf[2]) << 8) | buf[3];
+        const unsigned p2star = (static_cast<unsigned>(buf[4]) << 8) | buf[5];
+        std::printf("  p2_ms=%u\n", p2);
+        std::printf("  p2_star=0x%04X\n", p2star);
+    }
+
+    DoipLiteClose(session);
+    return 0;
+}
+
 const char *requireValue(int argc, char **argv, int *i, const char *name)
 {
     if (*i + 1 >= argc)
@@ -623,6 +786,20 @@ int main(int argc, char **argv)
             }
             flags.haveDid = true;
         }
+        else if (std::strcmp(arg, "--session") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--session");
+            if (!v)
+            {
+                return 2;
+            }
+            if (!parseU8(v, &flags.sessionType))
+            {
+                std::fputs("doiplite-cli: invalid --session\n", stderr);
+                return 2;
+            }
+            flags.haveSessionType = true;
+        }
         else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
         {
             printHelp();
@@ -657,6 +834,10 @@ int main(int argc, char **argv)
     if (std::strcmp(cmd, "read-version") == 0)
     {
         return cmdReadVersion(opt);
+    }
+    if (std::strcmp(cmd, "session") == 0)
+    {
+        return cmdSession(opt);
     }
 
     std::fprintf(stderr, "doiplite-cli: unknown command: %s\n", cmd);

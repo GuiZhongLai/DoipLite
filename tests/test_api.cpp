@@ -389,6 +389,137 @@ int main()
     DoipLiteClose(pendingDidSession);
     pendingDidEntity.stop();
 
+    expect(UdsDiagnosticSessionControl(nullptr, 0x01, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "session control null session");
+    uint8_t sessBuf[16];
+
+    DoipLiteSession *notActivatedSession = DoipLiteOpen(entity.ip(), entity.port());
+    expect(notActivatedSession != nullptr, "open for session without activate");
+    expect(UdsDiagnosticSessionControl(
+               notActivatedSession, 0x01, sessBuf, sizeof(sessBuf), nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "session control without routing activation is network");
+    DoipLiteClose(notActivatedSession);
+
+    LoopbackEntity::Options sessOpts;
+    sessOpts.supportedSession = 0x01; // ISO defaultSession example, not a plant value
+    sessOpts.rejectUnknownSession = true;
+    sessOpts.sessionIncludeTiming = true;
+    sessOpts.sessionP2 = 0x0032;
+    sessOpts.sessionP2Star = 0x01F4;
+    LoopbackEntity sessEntity(sessOpts);
+    expect(sessEntity.start(), "start session-control entity");
+    DoipLiteSession *sessSession = DoipLiteOpen(sessEntity.ip(), sessEntity.port());
+    expect(sessSession != nullptr, "open session-control entity");
+    expect(UdsDiagnosticSessionControl(sessSession, 0x01, nullptr, sizeof(sessBuf), nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "session control cap without buffer");
+    expect(DoipLiteRoutingActivation(sessSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate session-control entity");
+    uint32_t sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               sessSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session control success");
+    expect(sessLen == 6, "session positive response includes P2/P2*");
+    expect(sessBuf[0] == 0x50 && sessBuf[1] == 0x01, "positive 0x50 + subfunction");
+    expect(sessBuf[2] == 0x00 && sessBuf[3] == 0x32, "P2 50 ms");
+    expect(sessBuf[4] == 0x01 && sessBuf[5] == 0xF4, "P2* 0x01F4");
+
+    uint8_t sessNrc[16];
+    uint32_t sessNrcLen = 0;
+    expect(UdsDiagnosticSessionControl(
+               sessSession, 0x03, sessNrc, sizeof(sessNrc), &sessNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "unsupported session type is uds nrc");
+    expect(sessNrcLen == 3, "session nrc length");
+    expect(sessNrc[0] == 0x7F && sessNrc[1] == 0x10 && sessNrc[2] == 0x12,
+           "session nrc 0x12");
+    DoipLiteClose(sessSession);
+    sessEntity.stop();
+
+    // Default loopback echoes 0x10 as 0x50 + subfunction, without timing bytes.
+    DoipLiteSession *echoSession = DoipLiteOpen(entity.ip(), entity.port());
+    expect(echoSession != nullptr, "open default entity for session echo");
+    expect(DoipLiteRoutingActivation(echoSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for session echo");
+    sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               echoSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session control echo on default entity");
+    expect(sessLen == 2 && sessBuf[0] == 0x50 && sessBuf[1] == 0x01,
+           "default entity 0x10 echo is 0x50 + type");
+    DoipLiteClose(echoSession);
+
+    // suppressPositiveResponse (bit7): intentional silence must succeed without
+    // tearing down the TCP session; a later request on the same session works.
+    LoopbackEntity::Options sprOpts;
+    sprOpts.supportedSession = 0x01;
+    sprOpts.rejectUnknownSession = true;
+    LoopbackEntity sprEntity(sprOpts);
+    expect(sprEntity.start(), "start suppress-positive entity");
+    DoipLiteSession *sprSession = DoipLiteOpen(sprEntity.ip(), sprEntity.port());
+    expect(sprSession != nullptr, "open suppress-positive entity");
+    expect(DoipLiteRoutingActivation(sprSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate suppress-positive entity");
+    sessLen = 99;
+    std::memset(sessBuf, 0xAA, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               sprSession, 0x81, sessBuf, sizeof(sessBuf), &sessLen, 400) == DOIPLITE_OK,
+           "suppress-positive silence is success");
+    expect(sessLen == 0, "suppress-positive success has empty response");
+    sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               sprSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session remains usable after suppress-positive silence");
+    expect(sessLen == 2 && sessBuf[0] == 0x50 && sessBuf[1] == 0x01,
+           "post-suppress positive response");
+
+    // suppress + unsupported type still surfaces NRC and keeps the session.
+    sessNrcLen = 0;
+    std::memset(sessNrc, 0, sizeof(sessNrc));
+    expect(UdsDiagnosticSessionControl(
+               sprSession, 0x83, sessNrc, sizeof(sessNrc), &sessNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "suppress-positive still returns nrc");
+    expect(sessNrcLen == 3 && sessNrc[0] == 0x7F && sessNrc[1] == 0x10 && sessNrc[2] == 0x12,
+           "suppress-positive nrc 0x12 bytes");
+    sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               sprSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session remains usable after suppress-positive nrc");
+    DoipLiteClose(sprSession);
+    sprEntity.stop();
+
+    // Default entity also stays silent for 0x81 and keeps the connection.
+    DoipLiteSession *sprEcho = DoipLiteOpen(entity.ip(), entity.port());
+    expect(sprEcho != nullptr, "open default entity for suppress echo");
+    expect(DoipLiteRoutingActivation(sprEcho, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for suppress echo");
+    sessLen = 99;
+    expect(UdsDiagnosticSessionControl(
+               sprEcho, 0x81, sessBuf, sizeof(sessBuf), &sessLen, 400) == DOIPLITE_OK,
+           "default entity suppress-positive silence is success");
+    expect(sessLen == 0, "default entity suppress-positive empty response");
+    const uint8_t testerPresentAfterSpr[1] = {0x00};
+    udsLen = 0;
+    expect(DoipLiteSendUds(sprEcho,
+                           0x3E,
+                           testerPresentAfterSpr,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_OK,
+           "sendUds after suppress-positive still aligned");
+    expect(udsLen == 2 && udsResp[0] == 0x7E && udsResp[1] == 0x00,
+           "uds response after suppress-positive");
+    DoipLiteClose(sprEcho);
+
     LoopbackEntity::Options pendingTimeoutOpts;
     pendingTimeoutOpts.udsPendingCount = 1;
     pendingTimeoutOpts.udsDropAfterPending = true;
@@ -507,6 +638,83 @@ int main()
     expect(output.find("uds_nrc") != std::string::npos, "cli mentions uds_nrc");
     expect(output.find("0x31") != std::string::npos, "cli surfaces nrc 0x31");
     cliDid.stop();
+
+    int missingSessCode = 99;
+    std::string missingSessOut;
+    expect(run_cli("session --ip 127.0.0.1 --port 13400", &missingSessCode, &missingSessOut),
+           "run cli session without type");
+    expect(missingSessCode != 0, "cli session without type is non-zero");
+    expect(missingSessOut.find("session") != std::string::npos ||
+               missingSessOut.find("session_type") != std::string::npos,
+           "cli mentions missing session type");
+
+    // Oversized values must be rejected before narrowing. On LP64,
+    // 0x100000002 truncated to uint32_t becomes programmingSession 0x02.
+    int overflowSessCode = 0;
+    std::string overflowSessOut;
+    expect(run_cli("session --ip 127.0.0.1 --port 13400 --session 0x100000002",
+                   &overflowSessCode,
+                   &overflowSessOut),
+           "run cli session oversized hex");
+    expect(overflowSessCode == 2, "cli oversized session exits 2");
+    expect(overflowSessOut.find("invalid") != std::string::npos,
+           "cli oversized session mentions invalid");
+    expect(overflowSessOut.find("network") == std::string::npos &&
+               overflowSessOut.find("timeout") == std::string::npos,
+           "cli oversized session does not reach the wire");
+
+    overflowSessCode = 0;
+    overflowSessOut.clear();
+    expect(run_cli("session --ip 127.0.0.1 --port 13400 --session 4294967298",
+                   &overflowSessCode,
+                   &overflowSessOut),
+           "run cli session oversized decimal");
+    expect(overflowSessCode == 2, "cli oversized decimal session exits 2");
+    expect(overflowSessOut.find("invalid") != std::string::npos,
+           "cli oversized decimal session mentions invalid");
+
+    overflowSessCode = 0;
+    overflowSessOut.clear();
+    expect(run_cli("session --ip 127.0.0.1 --port 13400 --session 0x102",
+                   &overflowSessCode,
+                   &overflowSessOut),
+           "run cli session 0x102");
+    expect(overflowSessCode == 2, "cli session 0x102 exits 2");
+    expect(overflowSessOut.find("invalid") != std::string::npos,
+           "cli session 0x102 mentions invalid");
+
+    LoopbackEntity::Options cliSessOpts;
+    cliSessOpts.supportedSession = 0x01;
+    cliSessOpts.rejectUnknownSession = true;
+    cliSessOpts.sessionIncludeTiming = true;
+    cliSessOpts.sessionP2 = 0x0032;
+    cliSessOpts.sessionP2Star = 0x01F4;
+    LoopbackEntity cliSess(cliSessOpts);
+    expect(cliSess.start(), "start cli session entity");
+    char sessArgs[256];
+    std::snprintf(sessArgs,
+                  sizeof(sessArgs),
+                  "session --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--session 0x01 --timeout-ms 1000",
+                  static_cast<unsigned>(cliSess.port()));
+    expect(run_cli(sessArgs, &exitCode, &output), "run cli session");
+    expect(exitCode == 0, "cli session exits 0");
+    expect(output.find("50 01") != std::string::npos, "cli prints raw 0x50 response");
+    expect(output.find("session_type=0x01") != std::string::npos, "cli prints session type");
+    expect(output.find("p2_ms=50") != std::string::npos, "cli prints P2");
+    expect(output.find("p2_star=0x01F4") != std::string::npos, "cli prints P2*");
+
+    char sessNrcArgs[256];
+    std::snprintf(sessNrcArgs,
+                  sizeof(sessNrcArgs),
+                  "session --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--session 0x03 --timeout-ms 1000",
+                  static_cast<unsigned>(cliSess.port()));
+    expect(run_cli(sessNrcArgs, &exitCode, &output), "run cli session nrc");
+    expect(exitCode != 0, "cli unsupported session is non-zero");
+    expect(output.find("uds_nrc") != std::string::npos, "cli session mentions uds_nrc");
+    expect(output.find("0x12") != std::string::npos, "cli surfaces nrc 0x12");
+    cliSess.stop();
 
     LoopbackEntity::Options cliSilentOpts;
     cliSilentOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Silent;
