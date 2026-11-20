@@ -19,18 +19,20 @@ void printUsage(const char *argv0)
         stderr,
         "Usage: %s --config <station.conf> [--execute]\n"
         "\n"
-        "Default (no --execute): validate flash parameters from the config and\n"
-        "print the planned flash process. Performs NO network I/O and does NOT\n"
-        "mutate any ECU.\n"
+        "Default (no --execute): validate flash config fields and print the\n"
+        "planned process. Performs NO network I/O and does NOT mutate any ECU.\n"
+        "Dry-run does NOT open package_path or check payload length against\n"
+        "download_memory_size; those are checked at FlashStart under --execute.\n"
         "\n"
         "With --execute: discover, select device by identity selectors, connect,\n"
         "activate, DoipLiteFlashStart/Poll until DONE or FAILED, then close.\n"
-        "WARNING: --execute can erase, write, and/or reset an ECU. Confirm the\n"
-        "config targets the intended device before using this flag.\n"
+        "Success is reported only when phase is DONE. Poll-budget exhaustion is\n"
+        "an explicit failure. WARNING: --execute can erase, write, and/or reset\n"
+        "an ECU. Confirm the config targets the intended device first.\n"
         "\n"
-        "Security (0x27): if flash_require_security=1, the library returns\n"
-        "DOIPLITE_ERR_NOT_IMPLEMENTED during the SECURITY phase; this example\n"
-        "reports that clearly and does not attempt seed-key algorithms.\n"
+        "Security (0x27): if flash_require_security=1, the library fails the job\n"
+        "with DOIPLITE_ERR_NOT_IMPLEMENTED (phase becomes FAILED); this example\n"
+        "explains that contract from the job config and does not implement 0x27.\n"
         "\n"
         "See examples/config/station_template.conf and examples/README_zh.md.\n",
         argv0 ? argv0 : "doiplite-example-flash-job");
@@ -167,6 +169,9 @@ void printPlannedProcess(const doiplite_examples::StationConfig &cfg)
                   "and flash_keep_alive_sub_function to enable; no library defaults)");
     }
 
+    std::puts("dry-run note: config fields validated only; package_path is not opened "
+              "and payload length is not checked here (deferred to FlashStart on "
+              "--execute).");
     std::puts("dry-run complete. Pass --execute to perform discover/connect/flash.");
     std::puts(
         "WARNING: --execute can erase/write/reset an ECU. Confirm target identity first.");
@@ -250,8 +255,10 @@ int runExecute(const doiplite_examples::StationConfig &cfg)
         return 1;
     }
 
+    constexpr int kMaxPolls = 100000;
     DoipLiteFlashProgress prog{};
-    for (int i = 0; i < 100000; ++i)
+    bool pollLimitExhausted = true;
+    for (int i = 0; i < kMaxPolls; ++i)
     {
         st = DoipLiteFlashPoll(session, &prog);
         std::printf("flash poll phase=%s percent=%u status=%s\n",
@@ -260,44 +267,57 @@ int runExecute(const doiplite_examples::StationConfig &cfg)
                     DoipLiteStatusString(st));
         if (prog.phase == DOIPLITE_FLASH_DONE || prog.phase == DOIPLITE_FLASH_FAILED)
         {
+            pollLimitExhausted = false;
             break;
         }
     }
 
-    if (prog.phase == DOIPLITE_FLASH_FAILED || st != DOIPLITE_OK)
+    const auto runResult =
+        doiplite_examples::ClassifyFlashRunResult(prog.phase, st, pollLimitExhausted);
+    if (runResult == doiplite_examples::FlashRunResult::DoneOk)
     {
-        const DoipLiteStatus failSt = (st != DOIPLITE_OK) ? st : prog.err;
-        if (failSt == DOIPLITE_ERR_NOT_IMPLEMENTED &&
-            prog.phase == DOIPLITE_FLASH_SECURITY)
-        {
-            std::fputs(
-                "error: flash stopped at SECURITY — UDS 0x27 is not implemented "
-                "by DoipLite (DOIPLITE_ERR_NOT_IMPLEMENTED). Clear "
-                "flash_require_security or provide an external security solution "
-                "outside this library.\n",
-                stderr);
-        }
-        else if (failSt == DOIPLITE_ERR_NOT_IMPLEMENTED)
-        {
-            std::fprintf(stderr,
-                         "error: flash failed with NOT_IMPLEMENTED phase=%s\n",
-                         doiplite_examples::FlashPhaseName(prog.phase));
-        }
-        else
-        {
-            std::fprintf(stderr,
-                         "error: flash failed: %s phase=%s percent=%u\n",
-                         DoipLiteStatusString(failSt),
-                         doiplite_examples::FlashPhaseName(prog.phase),
-                         static_cast<unsigned>(prog.percent));
-        }
+        std::printf("flash ok percent=%u\n", static_cast<unsigned>(prog.percent));
         DoipLiteClose(session);
-        return 1;
+        return 0;
     }
 
-    std::printf("flash ok percent=%u\n", static_cast<unsigned>(prog.percent));
+    const DoipLiteStatus failSt = (st != DOIPLITE_OK) ? st : prog.err;
+    if (runResult == doiplite_examples::FlashRunResult::LimitExhausted)
+    {
+        std::fprintf(stderr,
+                     "error: flash poll limit (%d) exhausted without DONE "
+                     "(phase=%s percent=%u status=%s); treating as failure\n",
+                     kMaxPolls,
+                     doiplite_examples::FlashPhaseName(prog.phase),
+                     static_cast<unsigned>(prog.percent),
+                     DoipLiteStatusString(st));
+    }
+    else if (doiplite_examples::IsSecurityNotImplementedFailure(cfg, failSt))
+    {
+        // Core fail() sets phase to FAILED; explain from job config + status.
+        std::fputs(
+            "error: flash failed with DOIPLITE_ERR_NOT_IMPLEMENTED because "
+            "flash_require_security=1 — UDS 0x27 security access is not "
+            "implemented by DoipLite. Clear flash_require_security or provide "
+            "an external security solution outside this library.\n",
+            stderr);
+    }
+    else if (failSt == DOIPLITE_ERR_NOT_IMPLEMENTED)
+    {
+        std::fprintf(stderr,
+                     "error: flash failed with NOT_IMPLEMENTED phase=%s\n",
+                     doiplite_examples::FlashPhaseName(prog.phase));
+    }
+    else
+    {
+        std::fprintf(stderr,
+                     "error: flash failed: %s phase=%s percent=%u\n",
+                     DoipLiteStatusString(failSt != DOIPLITE_OK ? failSt : st),
+                     doiplite_examples::FlashPhaseName(prog.phase),
+                     static_cast<unsigned>(prog.percent));
+    }
     DoipLiteClose(session);
-    return 0;
+    return 1;
 }
 
 } // namespace

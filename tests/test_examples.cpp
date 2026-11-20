@@ -114,6 +114,38 @@ void test_config_validation()
            "reject u16 overflow");
     expect(err.find("select_logical_address") != std::string::npos, "overflow names key");
 
+    const std::string actOk = writeTempConfig(
+        "select_logical_address = 0x1234\n"
+        "tester_address = 0x0E00\n"
+        "activation_type = 0xFF\n"
+        "version_did = 0x0001\n",
+        "doiplite_ex_act_ff.conf");
+    expect(doiplite_examples::LoadStationConfig(actOk.c_str(), &cfg, &err) ==
+               doiplite_examples::ConfigLoadStatus::Ok,
+           "activation_type 0xFF accepted");
+    expect(cfg.activationType == 0xFF, "activation_type boundary 0xFF");
+
+    const std::string actOverflow = writeTempConfig(
+        "select_logical_address = 0x1234\n"
+        "tester_address = 0x0E00\n"
+        "activation_type = 0x100\n"
+        "version_did = 0x0001\n",
+        "doiplite_ex_act_100.conf");
+    expect(doiplite_examples::LoadStationConfig(actOverflow.c_str(), &cfg, &err) ==
+               doiplite_examples::ConfigLoadStatus::ParseError,
+           "activation_type 0x100 rejected before network");
+    expect(err.find("activation_type") != std::string::npos, "activation_type error names key");
+
+    const std::string actDec = writeTempConfig(
+        "select_logical_address = 0x1234\n"
+        "tester_address = 0x0E00\n"
+        "activation_type = 256\n"
+        "version_did = 0x0001\n",
+        "doiplite_ex_act_256.conf");
+    expect(doiplite_examples::LoadStationConfig(actDec.c_str(), &cfg, &err) ==
+               doiplite_examples::ConfigLoadStatus::ParseError,
+           "activation_type 256 rejected");
+
     const std::string badKey = writeTempConfig(
         "select_logical_address = 0x1234\n"
         "not_a_real_key = 1\n",
@@ -173,6 +205,51 @@ void test_config_validation()
     expect(job.haveKeepAliveSubFunction == 1, "keep-alive sub present");
     expect(job.keepAliveSubFunction == 0x80, "keep-alive sub value");
     expect(job.haveSecurity == 0, "security off by default");
+}
+
+void test_flash_run_classification()
+{
+    using doiplite_examples::ClassifyFlashRunResult;
+    using doiplite_examples::FlashRunResult;
+    using doiplite_examples::IsSecurityNotImplementedFailure;
+
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_DONE, DOIPLITE_OK, false) ==
+               FlashRunResult::DoneOk,
+           "DONE+OK is success");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_DONE, DOIPLITE_OK, true) ==
+               FlashRunResult::LimitExhausted,
+           "exhausted flag wins over DONE (should not happen in practice)");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_TRANSFER, DOIPLITE_OK, true) ==
+               FlashRunResult::LimitExhausted,
+           "transfer still running after limit is exhaustion failure");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_FAILED, DOIPLITE_OK, false) ==
+               FlashRunResult::Failed,
+           "FAILED phase is failure even if last status OK");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_TRANSFER, DOIPLITE_ERR_TIMEOUT, false) ==
+               FlashRunResult::PollError,
+           "poll error classified");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_FAILED,
+                                  DOIPLITE_ERR_NOT_IMPLEMENTED,
+                                  false) == FlashRunResult::PollError,
+           "NOT_IMPLEMENTED poll status is PollError class");
+
+    // Success must never be reported for non-DONE terminal-looking states.
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_TRANSFER, DOIPLITE_OK, false) !=
+               FlashRunResult::DoneOk,
+           "non-DONE never DoneOk");
+    expect(ClassifyFlashRunResult(DOIPLITE_FLASH_FAILED, DOIPLITE_OK, false) !=
+               FlashRunResult::DoneOk,
+           "FAILED never DoneOk");
+
+    doiplite_examples::StationConfig secCfg;
+    secCfg.haveSecurity = true;
+    expect(IsSecurityNotImplementedFailure(secCfg, DOIPLITE_ERR_NOT_IMPLEMENTED),
+           "security+NOT_IMPLEMENTED actionable");
+    expect(!IsSecurityNotImplementedFailure(secCfg, DOIPLITE_ERR_TIMEOUT),
+           "security without NOT_IMPLEMENTED is false");
+    doiplite_examples::StationConfig noSec;
+    expect(!IsSecurityNotImplementedFailure(noSec, DOIPLITE_ERR_NOT_IMPLEMENTED),
+           "NOT_IMPLEMENTED without security flag is not security explanation");
 }
 
 void test_identity_matching()
@@ -256,6 +333,9 @@ void test_flash_dry_run_gate()
                out.find("NO network") != std::string::npos ||
                out.find("no ECU") != std::string::npos,
            "dry-run states no network/ECU change");
+    expect(out.find("package_path is not opened") != std::string::npos ||
+               out.find("config fields validated only") != std::string::npos,
+           "dry-run states package/payload not validated");
     expect(out.find("keep-alive") != std::string::npos, "dry-run shows keep-alive");
     expect(out.find("--execute") != std::string::npos, "dry-run mentions execute gate");
     // Must not look like a real discover/connect happened.
@@ -328,6 +408,7 @@ void test_read_version_requires_config()
 int main()
 {
     test_config_validation();
+    test_flash_run_classification();
     test_identity_matching();
     test_flash_dry_run_gate();
     test_read_version_requires_config();

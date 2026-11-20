@@ -30,6 +30,8 @@ struct StationConfig
     // Tester / activation / timing
     uint16_t testerAddress = 0;
     bool haveTesterAddress = false;
+    // Wire activation type is 8-bit (DoipLiteRoutingActivationEx takes uint16_t
+    // but uses the low 8 bits). Example parser rejects values above 0xFF.
     uint16_t activationType = 0x00;
     bool haveActivationType = false;
     uint32_t timeoutMs = DOIPLITE_DEFAULT_TIMEOUT_MS;
@@ -126,5 +128,25 @@ bool ValidateFlashConfig(const StationConfig &cfg, std::string *err);
 void FillFlashJob(const StationConfig &cfg, DoipLiteFlashJob *job);
 
 const char *FlashPhaseName(DoipLiteFlashPhase phase);
+
+// Classify the end of a FlashPoll loop. Success only when phase is DONE and
+// the last poll status is OK. Limit exhaustion (loop ended without DONE/FAILED)
+// is never treated as success.
+enum class FlashRunResult
+{
+    DoneOk = 0,
+    Failed,
+    PollError,
+    LimitExhausted
+};
+
+FlashRunResult ClassifyFlashRunResult(DoipLiteFlashPhase phase,
+                                      DoipLiteStatus lastPollStatus,
+                                      bool pollLimitExhausted);
+
+// True when a security-required job hit the core NOT_IMPLEMENTED contract.
+// Prefer job config over phase: orchestrator sets phase to FAILED on fail().
+bool IsSecurityNotImplementedFailure(const StationConfig &cfg,
+                                     DoipLiteStatus failStatus);
 
 } // namespace doiplite_examples

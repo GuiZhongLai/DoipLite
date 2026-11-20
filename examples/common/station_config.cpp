@@ -245,10 +245,14 @@ bool applyKey(StationConfig *cfg, const std::string &key, const std::string &val
     }
     if (key == "activation_type")
     {
-        if (value.empty() || !parseU16(value, &cfg->activationType))
+        // Public API parameter is uint16_t, but the on-wire field is 8-bit
+        // (session uses activationType & 0xff). Reject values that would truncate.
+        uint8_t type8 = 0;
+        if (value.empty() || !parseU8(value, &type8))
         {
-            return fail("invalid activation_type");
+            return fail("invalid activation_type (must be 0..0xFF)");
         }
+        cfg->activationType = type8;
         cfg->haveActivationType = true;
         return true;
     }
@@ -775,6 +779,37 @@ const char *FlashPhaseName(DoipLiteFlashPhase phase)
     default:
         return "UNKNOWN";
     }
+}
+
+FlashRunResult ClassifyFlashRunResult(DoipLiteFlashPhase phase,
+                                      DoipLiteStatus lastPollStatus,
+                                      bool pollLimitExhausted)
+{
+    if (pollLimitExhausted)
+    {
+        return FlashRunResult::LimitExhausted;
+    }
+    if (phase == DOIPLITE_FLASH_DONE && lastPollStatus == DOIPLITE_OK)
+    {
+        return FlashRunResult::DoneOk;
+    }
+    if (lastPollStatus != DOIPLITE_OK)
+    {
+        return FlashRunResult::PollError;
+    }
+    if (phase == DOIPLITE_FLASH_FAILED)
+    {
+        return FlashRunResult::Failed;
+    }
+    // Non-terminal phase without hitting the coded limit should not happen;
+    // treat as failure so callers never report success.
+    return FlashRunResult::Failed;
+}
+
+bool IsSecurityNotImplementedFailure(const StationConfig &cfg,
+                                     DoipLiteStatus failStatus)
+{
+    return cfg.haveSecurity && failStatus == DOIPLITE_ERR_NOT_IMPLEMENTED;
 }
 
 } // namespace doiplite_examples

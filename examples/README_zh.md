@@ -68,15 +68,20 @@
 ## 刷写干跑与执行门闩
 
 ```bash
-# 默认：只校验配置并打印计划（无网络、不改 ECU）
+# 默认：只校验配置字段并打印计划（无网络、不改 ECU）
+# 干跑不打开 package_path，也不核对载荷长度与 download_memory_size；
+# 这些要到 --execute 后的 FlashStart 才会检查。勿把干跑通过理解为包已校验。
 ./doiplite-example-flash-job --config /path/to/station.conf
 
 # 显式执行：才会 discover / connect / FlashStart / FlashPoll
+# 仅 phase==DONE 视为成功；轮询次数耗尽为明确失败
 # 警告：可能擦除、写入、复位 ECU
 ./doiplite-example-flash-job --config /path/to/station.conf --execute
 ```
 
-若 `flash_require_security=1`，执行时在 SECURITY 阶段会得到 `DOIPLITE_ERR_NOT_IMPLEMENTED`；示例明确打印该契约，不实现 `0x27`。
+若 `flash_require_security=1`，核心在安全阶段以 `DOIPLITE_ERR_NOT_IMPLEMENTED` 失败（phase 会变为 `FAILED`）；示例根据作业配置打印该契约说明，不实现 `0x27`。
+
+`activation_type` 按线路 8 位校验（`0..0xFF`）；`0x100` 等超出值在解析时拒绝，不会截断后联网。
 
 ## 构建与运行
 
