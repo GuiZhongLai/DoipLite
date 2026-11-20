@@ -20,6 +20,12 @@ add_library(doiplite
     src/uds/read_did.cpp
     src/uds/session_control.cpp
     src/uds/tester_present.cpp
+    src/uds/routine_control.cpp
+    src/uds/request_download.cpp
+    src/uds/transfer_data.cpp
+    src/uds/request_transfer_exit.cpp
+    src/uds/ecu_reset.cpp
+    src/flash/flash_orchestrator.cpp
     src/flash/flash.cpp
 )
 add_library(DoipLite::doiplite ALIAS doiplite)

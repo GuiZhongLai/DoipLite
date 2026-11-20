@@ -6,6 +6,7 @@
 #include <cstring>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace {
 
@@ -26,6 +27,51 @@ struct Options
     uint16_t did = 0;
     uint8_t sessionType = 0;
     uint8_t testerPresentSub = 0;
+
+    // UDS 0x31 RoutineControl (unique keys; not bare sub_function).
+    uint8_t routineSubFunction = 0;
+    uint16_t routineId = 0;
+    std::vector<uint8_t> routineOption;
+    bool haveRoutineSubFunction = false;
+    bool haveRoutineId = false;
+
+    // UDS 0x34 RequestDownload
+    uint8_t downloadDataFormatId = 0;
+    uint8_t downloadAlfid = 0;
+    uint64_t downloadMemoryAddress = 0;
+    uint64_t downloadMemorySize = 0;
+    bool haveDownloadDataFormatId = false;
+    bool haveDownloadAlfid = false;
+    bool haveDownloadMemoryAddress = false;
+    bool haveDownloadMemorySize = false;
+
+    // UDS 0x36 TransferData
+    uint8_t transferBlockCounter = 0;
+    std::vector<uint8_t> transferData;
+    std::string transferDataFile;
+    bool haveTransferBlockCounter = false;
+
+    // UDS 0x37 RequestTransferExit
+    std::vector<uint8_t> transferExitParam;
+    bool haveTransferExitParam = false;
+
+    // UDS 0x11 ECUReset
+    uint8_t ecuResetType = 0;
+    bool haveEcuResetType = false;
+
+    // flash orchestration
+    uint8_t flashSessionType = 0;
+    bool haveFlashSessionType = false;
+    uint8_t flashEraseRoutineSubFunction = 0;
+    uint16_t flashEraseRoutineId = 0;
+    std::vector<uint8_t> flashEraseRoutineOption;
+    bool haveFlashEraseRoutine = false;
+    uint32_t flashMaxBlockDataCap = 0;
+    bool haveFlashMaxBlockDataCap = false;
+    std::string packagePath;
+    uint8_t flashResetType = 0;
+    bool haveFlashResetType = false;
+
     bool havePort = false;
     bool haveTesterAddr = false;
     bool haveActivationType = false;
@@ -42,55 +88,50 @@ void printHelp()
         "\n"
         "Usage:\n"
         "  doiplite-cli --help\n"
-        "  doiplite-cli discover  [options]\n"
-        "  doiplite-cli activate  [options]\n"
-        "  doiplite-cli read-version [options]\n"
-        "  doiplite-cli session [options]\n"
-        "  doiplite-cli tester-present [options]\n"
+        "  doiplite-cli discover | activate | read-version | session | tester-present\n"
+        "  doiplite-cli routine-control | request-download | transfer-data\n"
+        "  doiplite-cli request-transfer-exit | ecu-reset | flash\n"
         "\n"
-        "Options:\n"
+        "Common options:\n"
         "  --config <path>           Load key=value settings (flags override file)\n"
-        "  --ip <ipv4>               Entity IPv4 address (activate / read-version / session / tester-present)\n"
+        "  --ip <ipv4>               Entity IPv4 address\n"
         "  --broadcast <ipv4>        Discover destination (default: 255.255.255.255)\n"
         "  --port <n>                UDP/TCP port (default: 13400)\n"
         "  --tester-addr <addr>      Tester logical address (hex 0x0E00 or decimal)\n"
         "  --activation-type <n>     Routing activation type (default: 0x00 ISO default)\n"
         "  --timeout-ms <n>          I/O timeout in milliseconds (default: 2000)\n"
-        "  --did <id>                Version DID for read-version (hex 0x0001 or decimal)\n"
-        "  --session <n>             Session type / sub-function for session (hex 0x01 or decimal)\n"
-        "  --sub-function <n>        Sub-function for tester-present (hex 0x00 or decimal)\n"
         "\n"
-        "discover prints the IP and logical address of each responding entity and\n"
-        "exits 0 if at least one is found. activate opens a TCP diagnostic connection\n"
-        "and performs routing activation.\n"
+        "Service-specific options (config keys are unique; see examples/config/example.conf):\n"
+        "  --did / version_did\n"
+        "  --session / session_type\n"
+        "  --sub-function / tester_present_sub_function\n"
+        "  --routine-sub-function / routine_sub_function\n"
+        "  --routine-id / routine_id\n"
+        "  --routine-option-hex / routine_option_hex\n"
+        "  --download-data-format-id / download_data_format_id\n"
+        "  --download-alfid / download_alfid\n"
+        "  --download-memory-address / download_memory_address\n"
+        "  --download-memory-size / download_memory_size\n"
+        "  --transfer-block-counter / transfer_block_sequence_counter\n"
+        "  --transfer-data-hex / transfer_data_hex\n"
+        "  --transfer-data-file / transfer_data_file\n"
+        "  --transfer-exit-param-hex / transfer_exit_param_hex\n"
+        "  --ecu-reset-type / ecu_reset_type\n"
+        "  --flash-session-type / flash_session_type\n"
+        "  --flash-erase-routine-sub-function / flash_erase_routine_sub_function\n"
+        "  --flash-erase-routine-id / flash_erase_routine_id\n"
+        "  --flash-erase-routine-option-hex / flash_erase_routine_option_hex\n"
+        "  --flash-max-block-data-cap / flash_max_block_data_cap\n"
+        "  --package-path / package_path\n"
+        "  --flash-reset-type / flash_reset_type\n"
         "\n"
-        "read-version opens a TCP connection, performs routing activation, and sends\n"
-        "UDS 0x22 ReadDataByIdentifier. The DID must come from --did or version_did in\n"
-        "the config file; there is no library default. On success it prints the raw\n"
-        "UDS response and hex of the data record; if the data is printable text, it\n"
-        "also prints the version string. Exit 0 on success. Timeout, DoIP NACK, UDS\n"
-        "NRC, or a missing DID exits non-zero with a reason.\n"
-        "\n"
-        "session opens a TCP connection, performs routing activation, and sends UDS 0x10\n"
-        "DiagnosticSessionControl. The session type must come from --session or\n"
-        "session_type in the config file; there is no library default and the CLI does\n"
-        "not assume a programming session. On success it prints the raw UDS response\n"
-        "(0x50 + sub-function, and P2/P2* if present). Exit 0 on success. Timeout,\n"
-        "DoIP NACK, UDS NRC, or a missing session type exits non-zero with a reason.\n"
-        "\n"
-        "tester-present opens a TCP connection, performs routing activation, and sends\n"
-        "UDS 0x3E TesterPresent. The sub-function must come from --sub-function or\n"
-        "tester_present_sub_function in the config file; there is no library default\n"
-        "(including no zeroSubFunction). On success it prints the raw UDS response\n"
-        "(0x7E + sub-function, or empty when suppressPositiveResponse silence succeeds).\n"
-        "Exit 0 on success. Timeout, DoIP NACK, UDS NRC, or a missing sub-function\n"
-        "exits non-zero with a reason.\n"
-        "\n"
-        "If --tester-addr / tester_address is omitted, activate, read-version, session\n"
-        "and tester-present use 0x0E00 as an example default from the ISO 13400\n"
-        "external test equipment range. Replace it with your own tester address; it is\n"
-        "not a field value. Do not hard-code plant IPs, VINs, or secrets. See\n"
-        "examples/config/example.conf.\n",
+        "All field-specific values come from flags/config; the library never invents\n"
+        "plant IPs, routine IDs, memory addresses, reset types, or programming session.\n"
+        "flash runs the orchestrated sequence (optional session/erase/reset; required\n"
+        "download+transfer+exit from package_path or transfer data). 0x27 security is\n"
+        "not implemented. Periodic TesterPresent during long transfer is a follow-up.\n"
+        "If --tester-addr is omitted, activate and diagnostic commands use 0x0E00 as an\n"
+        "ISO external-test-equipment example default (not a field address).\n",
         stdout);
 }
 
@@ -160,6 +201,76 @@ bool parseU8(const std::string &text, uint8_t *out)
         return false;
     }
     *out = static_cast<uint8_t>(value);
+    return true;
+}
+
+bool parseU64(const std::string &text, uint64_t *out)
+{
+    if (!out || text.empty())
+    {
+        return false;
+    }
+    char *end = nullptr;
+    const bool hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    errno = 0;
+    const unsigned long long value = std::strtoull(text.c_str(), &end, hex ? 16 : 10);
+    if (errno == ERANGE || !end || end == text.c_str() || *end != '\0')
+    {
+        return false;
+    }
+    *out = static_cast<uint64_t>(value);
+    return true;
+}
+
+int hexNibble(char c)
+{
+    if (c >= '0' && c <= '9')
+    {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f')
+    {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F')
+    {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+bool parseHexBytes(const std::string &text, std::vector<uint8_t> *out)
+{
+    if (!out)
+    {
+        return false;
+    }
+    out->clear();
+    std::string hex;
+    hex.reserve(text.size());
+    for (char c : text)
+    {
+        if (c == ' ' || c == '\t' || c == ':' || c == '-')
+        {
+            continue;
+        }
+        hex.push_back(c);
+    }
+    if (hex.empty() || (hex.size() % 2) != 0)
+    {
+        return false;
+    }
+    for (std::size_t i = 0; i < hex.size(); i += 2)
+    {
+        const int hi = hexNibble(hex[i]);
+        const int lo = hexNibble(hex[i + 1]);
+        if (hi < 0 || lo < 0)
+        {
+            out->clear();
+            return false;
+        }
+        out->push_back(static_cast<uint8_t>((hi << 4) | lo));
+    }
     return true;
 }
 
@@ -244,6 +355,183 @@ bool applyKey(Options *opt, const std::string &key, const std::string &value, st
             return false;
         }
         opt->haveTesterPresentSub = true;
+        return true;
+    }
+    if (key == "routine_sub_function")
+    {
+        if (value.empty() || !parseU8(value, &opt->routineSubFunction))
+        {
+            *err = "invalid routine_sub_function";
+            return false;
+        }
+        opt->haveRoutineSubFunction = true;
+        return true;
+    }
+    if (key == "routine_id")
+    {
+        if (value.empty() || !parseU16(value, &opt->routineId))
+        {
+            *err = "invalid routine_id";
+            return false;
+        }
+        opt->haveRoutineId = true;
+        return true;
+    }
+    if (key == "routine_option_hex")
+    {
+        if (!parseHexBytes(value, &opt->routineOption))
+        {
+            *err = "invalid routine_option_hex";
+            return false;
+        }
+        return true;
+    }
+    if (key == "download_data_format_id")
+    {
+        if (value.empty() || !parseU8(value, &opt->downloadDataFormatId))
+        {
+            *err = "invalid download_data_format_id";
+            return false;
+        }
+        opt->haveDownloadDataFormatId = true;
+        return true;
+    }
+    if (key == "download_alfid")
+    {
+        if (value.empty() || !parseU8(value, &opt->downloadAlfid))
+        {
+            *err = "invalid download_alfid";
+            return false;
+        }
+        opt->haveDownloadAlfid = true;
+        return true;
+    }
+    if (key == "download_memory_address")
+    {
+        if (value.empty() || !parseU64(value, &opt->downloadMemoryAddress))
+        {
+            *err = "invalid download_memory_address";
+            return false;
+        }
+        opt->haveDownloadMemoryAddress = true;
+        return true;
+    }
+    if (key == "download_memory_size")
+    {
+        if (value.empty() || !parseU64(value, &opt->downloadMemorySize))
+        {
+            *err = "invalid download_memory_size";
+            return false;
+        }
+        opt->haveDownloadMemorySize = true;
+        return true;
+    }
+    if (key == "transfer_block_sequence_counter")
+    {
+        if (value.empty() || !parseU8(value, &opt->transferBlockCounter))
+        {
+            *err = "invalid transfer_block_sequence_counter";
+            return false;
+        }
+        opt->haveTransferBlockCounter = true;
+        return true;
+    }
+    if (key == "transfer_data_hex")
+    {
+        if (!parseHexBytes(value, &opt->transferData))
+        {
+            *err = "invalid transfer_data_hex";
+            return false;
+        }
+        return true;
+    }
+    if (key == "transfer_data_file")
+    {
+        opt->transferDataFile = value;
+        return true;
+    }
+    if (key == "transfer_exit_param_hex")
+    {
+        if (!parseHexBytes(value, &opt->transferExitParam))
+        {
+            *err = "invalid transfer_exit_param_hex";
+            return false;
+        }
+        opt->haveTransferExitParam = true;
+        return true;
+    }
+    if (key == "ecu_reset_type")
+    {
+        if (value.empty() || !parseU8(value, &opt->ecuResetType))
+        {
+            *err = "invalid ecu_reset_type";
+            return false;
+        }
+        opt->haveEcuResetType = true;
+        return true;
+    }
+    if (key == "flash_session_type")
+    {
+        if (value.empty() || !parseU8(value, &opt->flashSessionType))
+        {
+            *err = "invalid flash_session_type";
+            return false;
+        }
+        opt->haveFlashSessionType = true;
+        return true;
+    }
+    if (key == "flash_erase_routine_sub_function")
+    {
+        if (value.empty() || !parseU8(value, &opt->flashEraseRoutineSubFunction))
+        {
+            *err = "invalid flash_erase_routine_sub_function";
+            return false;
+        }
+        opt->haveFlashEraseRoutine = true;
+        return true;
+    }
+    if (key == "flash_erase_routine_id")
+    {
+        if (value.empty() || !parseU16(value, &opt->flashEraseRoutineId))
+        {
+            *err = "invalid flash_erase_routine_id";
+            return false;
+        }
+        opt->haveFlashEraseRoutine = true;
+        return true;
+    }
+    if (key == "flash_erase_routine_option_hex")
+    {
+        if (!parseHexBytes(value, &opt->flashEraseRoutineOption))
+        {
+            *err = "invalid flash_erase_routine_option_hex";
+            return false;
+        }
+        return true;
+    }
+    if (key == "flash_max_block_data_cap")
+    {
+        if (value.empty() || !parseU32(value, &opt->flashMaxBlockDataCap))
+        {
+            *err = "invalid flash_max_block_data_cap";
+            return false;
+        }
+        opt->haveFlashMaxBlockDataCap = true;
+        return true;
+    }
+    if (key == "package_path")
+    {
+        opt->packagePath = value;
+        return true;
+    }
+    if (key == "flash_reset_type")
+    {
+        if (value.empty() || !parseU8(value, &opt->flashResetType))
+        {
+            *err = "invalid flash_reset_type";
+            return false;
+        }
+        opt->haveFlashResetType = true;
         return true;
     }
     // Unknown keys (e.g. entity_address) are ignored.
@@ -338,6 +626,92 @@ void mergeFlags(Options *opt, const Options &flags)
     {
         opt->testerPresentSub = flags.testerPresentSub;
         opt->haveTesterPresentSub = true;
+    }
+    if (flags.haveRoutineSubFunction)
+    {
+        opt->routineSubFunction = flags.routineSubFunction;
+        opt->haveRoutineSubFunction = true;
+    }
+    if (flags.haveRoutineId)
+    {
+        opt->routineId = flags.routineId;
+        opt->haveRoutineId = true;
+    }
+    if (!flags.routineOption.empty())
+    {
+        opt->routineOption = flags.routineOption;
+    }
+    if (flags.haveDownloadDataFormatId)
+    {
+        opt->downloadDataFormatId = flags.downloadDataFormatId;
+        opt->haveDownloadDataFormatId = true;
+    }
+    if (flags.haveDownloadAlfid)
+    {
+        opt->downloadAlfid = flags.downloadAlfid;
+        opt->haveDownloadAlfid = true;
+    }
+    if (flags.haveDownloadMemoryAddress)
+    {
+        opt->downloadMemoryAddress = flags.downloadMemoryAddress;
+        opt->haveDownloadMemoryAddress = true;
+    }
+    if (flags.haveDownloadMemorySize)
+    {
+        opt->downloadMemorySize = flags.downloadMemorySize;
+        opt->haveDownloadMemorySize = true;
+    }
+    if (flags.haveTransferBlockCounter)
+    {
+        opt->transferBlockCounter = flags.transferBlockCounter;
+        opt->haveTransferBlockCounter = true;
+    }
+    if (!flags.transferData.empty())
+    {
+        opt->transferData = flags.transferData;
+    }
+    if (!flags.transferDataFile.empty())
+    {
+        opt->transferDataFile = flags.transferDataFile;
+    }
+    if (flags.haveTransferExitParam || !flags.transferExitParam.empty())
+    {
+        opt->transferExitParam = flags.transferExitParam;
+        opt->haveTransferExitParam = true;
+    }
+    if (flags.haveEcuResetType)
+    {
+        opt->ecuResetType = flags.ecuResetType;
+        opt->haveEcuResetType = true;
+    }
+    if (flags.haveFlashSessionType)
+    {
+        opt->flashSessionType = flags.flashSessionType;
+        opt->haveFlashSessionType = true;
+    }
+    if (flags.haveFlashEraseRoutine)
+    {
+        opt->flashEraseRoutineSubFunction = flags.flashEraseRoutineSubFunction;
+        opt->flashEraseRoutineId = flags.flashEraseRoutineId;
+        opt->haveFlashEraseRoutine = true;
+    }
+    if (!flags.flashEraseRoutineOption.empty())
+    {
+        opt->flashEraseRoutineOption = flags.flashEraseRoutineOption;
+    }
+    if (flags.haveFlashMaxBlockDataCap)
+    {
+        opt->flashMaxBlockDataCap = flags.flashMaxBlockDataCap;
+        opt->haveFlashMaxBlockDataCap = true;
+    }
+    if (!flags.packagePath.empty())
+    {
+        opt->packagePath = flags.packagePath;
+    }
+    if (flags.haveFlashResetType)
+    {
+        opt->flashResetType = flags.flashResetType;
+        opt->haveFlashResetType = true;
     }
 }
 
@@ -791,6 +1165,413 @@ int cmdTesterPresent(const Options &opt)
     return 0;
 }
 
+void printUdsFailure(const char *cmd,
+                     DoipLiteSession *session,
+                     DoipLiteStatus st,
+                     const uint8_t *buf,
+                     uint32_t len)
+{
+    std::fprintf(stderr, "doiplite-cli: %s failed: %s", cmd, DoipLiteStatusString(st));
+    if (st == DOIPLITE_ERR_DOIP_NACK)
+    {
+        std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+    }
+    else if (st == DOIPLITE_ERR_UDS_NRC)
+    {
+        if (len >= 3)
+        {
+            std::fprintf(stderr, " (nrc 0x%02X)", buf[2]);
+        }
+    }
+    std::fputc('\n', stderr);
+}
+
+DoipLiteSession *openActivated(const Options &opt, const char *cmd, int *exitCode)
+{
+    if (opt.ip.empty())
+    {
+        std::fprintf(stderr, "doiplite-cli: %s requires --ip or config ip\n", cmd);
+        *exitCode = 2;
+        return nullptr;
+    }
+    const uint16_t port = opt.havePort ? opt.port : DOIPLITE_DEFAULT_TCP_PORT;
+    DoipLiteSession *session = DoipLiteOpen(opt.ip.c_str(), port);
+    if (!session)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: %s failed: invalid_arg (cannot open %s:%u)\n",
+                     cmd,
+                     opt.ip.c_str(),
+                     static_cast<unsigned>(port));
+        *exitCode = 2;
+        return nullptr;
+    }
+    const DoipLiteStatus st = DoipLiteRoutingActivationEx(
+        session, opt.testerAddr, opt.activationType, nullptr, 0, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure(cmd, session, st, nullptr, 0);
+        DoipLiteClose(session);
+        *exitCode = 1;
+        return nullptr;
+    }
+    return session;
+}
+
+int cmdRoutineControl(const Options &opt)
+{
+    if (!opt.haveRoutineSubFunction || !opt.haveRoutineId)
+    {
+        std::fputs(
+            "doiplite-cli: routine-control requires --routine-sub-function and "
+            "--routine-id (or config routine_sub_function / routine_id)\n",
+            stderr);
+        return 2;
+    }
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "routine-control", &code);
+    if (!session)
+    {
+        return code;
+    }
+    uint8_t buf[256];
+    uint32_t len = 0;
+    const DoipLiteStatus st = UdsRoutineControl(
+        session,
+        opt.routineSubFunction,
+        opt.routineId,
+        opt.routineOption.empty() ? nullptr : opt.routineOption.data(),
+        static_cast<uint32_t>(opt.routineOption.size()),
+        buf,
+        sizeof(buf),
+        &len,
+        opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure("routine-control", session, st, buf, len);
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::printf("routine-control ok sub=0x%02X id=0x%04X\n",
+                static_cast<unsigned>(opt.routineSubFunction),
+                static_cast<unsigned>(opt.routineId));
+    std::fputs("  uds=", stdout);
+    printHexBytes(buf, len);
+    std::fputc('\n', stdout);
+    DoipLiteClose(session);
+    return 0;
+}
+
+int cmdRequestDownload(const Options &opt)
+{
+    if (!opt.haveDownloadAlfid || !opt.haveDownloadMemoryAddress ||
+        !opt.haveDownloadMemorySize)
+    {
+        std::fputs(
+            "doiplite-cli: request-download requires --download-alfid, "
+            "--download-memory-address and --download-memory-size\n",
+            stderr);
+        return 2;
+    }
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "request-download", &code);
+    if (!session)
+    {
+        return code;
+    }
+    uint8_t buf[64];
+    uint32_t len = 0;
+    uint32_t maxBlock = 0;
+    const uint8_t dfid = opt.haveDownloadDataFormatId ? opt.downloadDataFormatId : 0;
+    const DoipLiteStatus st = UdsRequestDownload(
+        session,
+        dfid,
+        opt.downloadAlfid,
+        opt.downloadMemoryAddress,
+        opt.downloadMemorySize,
+        &maxBlock,
+        buf,
+        sizeof(buf),
+        &len,
+        opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure("request-download", session, st, buf, len);
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::printf("request-download ok max_block_length=%u\n",
+                static_cast<unsigned>(maxBlock));
+    std::fputs("  uds=", stdout);
+    printHexBytes(buf, len);
+    std::fputc('\n', stdout);
+    DoipLiteClose(session);
+    return 0;
+}
+
+bool loadFileBytes(const std::string &path, std::vector<uint8_t> *out, std::string *err)
+{
+    std::ifstream in(path, std::ios::binary);
+    if (!in)
+    {
+        *err = "cannot read file: " + path;
+        return false;
+    }
+    in.seekg(0, std::ios::end);
+    const std::streamoff size = in.tellg();
+    if (size < 0)
+    {
+        *err = "cannot size file: " + path;
+        return false;
+    }
+    in.seekg(0, std::ios::beg);
+    out->resize(static_cast<std::size_t>(size));
+    if (size > 0)
+    {
+        in.read(reinterpret_cast<char *>(out->data()), size);
+        if (!in)
+        {
+            *err = "cannot read file: " + path;
+            return false;
+        }
+    }
+    return true;
+}
+
+int cmdTransferData(const Options &opt)
+{
+    if (!opt.haveTransferBlockCounter)
+    {
+        std::fputs(
+            "doiplite-cli: transfer-data requires --transfer-block-counter "
+            "(or config transfer_block_sequence_counter)\n",
+            stderr);
+        return 2;
+    }
+    std::vector<uint8_t> data = opt.transferData;
+    if (data.empty() && !opt.transferDataFile.empty())
+    {
+        std::string err;
+        if (!loadFileBytes(opt.transferDataFile, &data, &err))
+        {
+            std::fprintf(stderr, "doiplite-cli: %s\n", err.c_str());
+            return 2;
+        }
+    }
+    if (data.empty())
+    {
+        std::fputs(
+            "doiplite-cli: transfer-data requires --transfer-data-hex or "
+            "--transfer-data-file\n",
+            stderr);
+        return 2;
+    }
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "transfer-data", &code);
+    if (!session)
+    {
+        return code;
+    }
+    uint8_t buf[64];
+    uint32_t len = 0;
+    const DoipLiteStatus st = UdsTransferData(
+        session,
+        opt.transferBlockCounter,
+        data.data(),
+        static_cast<uint32_t>(data.size()),
+        buf,
+        sizeof(buf),
+        &len,
+        opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure("transfer-data", session, st, buf, len);
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::printf("transfer-data ok block=0x%02X bytes=%u\n",
+                static_cast<unsigned>(opt.transferBlockCounter),
+                static_cast<unsigned>(data.size()));
+    std::fputs("  uds=", stdout);
+    printHexBytes(buf, len);
+    std::fputc('\n', stdout);
+    DoipLiteClose(session);
+    return 0;
+}
+
+int cmdRequestTransferExit(const Options &opt)
+{
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "request-transfer-exit", &code);
+    if (!session)
+    {
+        return code;
+    }
+    uint8_t buf[64];
+    uint32_t len = 0;
+    const DoipLiteStatus st = UdsRequestTransferExit(
+        session,
+        opt.transferExitParam.empty() ? nullptr : opt.transferExitParam.data(),
+        static_cast<uint32_t>(opt.transferExitParam.size()),
+        buf,
+        sizeof(buf),
+        &len,
+        opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure("request-transfer-exit", session, st, buf, len);
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::fputs("request-transfer-exit ok\n  uds=", stdout);
+    printHexBytes(buf, len);
+    std::fputc('\n', stdout);
+    DoipLiteClose(session);
+    return 0;
+}
+
+int cmdEcuReset(const Options &opt)
+{
+    if (!opt.haveEcuResetType)
+    {
+        std::fputs(
+            "doiplite-cli: ecu-reset requires --ecu-reset-type (or config ecu_reset_type)\n",
+            stderr);
+        return 2;
+    }
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "ecu-reset", &code);
+    if (!session)
+    {
+        return code;
+    }
+    uint8_t buf[16];
+    uint32_t len = 0;
+    const DoipLiteStatus st =
+        UdsEcuReset(session, opt.ecuResetType, buf, sizeof(buf), &len, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        printUdsFailure("ecu-reset", session, st, buf, len);
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::printf("ecu-reset ok type=0x%02X\n", static_cast<unsigned>(opt.ecuResetType));
+    std::fputs("  uds=", stdout);
+    if (len == 0)
+    {
+        std::fputs("(empty)", stdout);
+    }
+    else
+    {
+        printHexBytes(buf, len);
+    }
+    std::fputc('\n', stdout);
+    DoipLiteClose(session);
+    return 0;
+}
+
+int cmdFlash(const Options &opt)
+{
+    if (!opt.haveDownloadAlfid || !opt.haveDownloadMemoryAddress)
+    {
+        std::fputs(
+            "doiplite-cli: flash requires --download-alfid and "
+            "--download-memory-address\n",
+            stderr);
+        return 2;
+    }
+    if (opt.packagePath.empty() && opt.transferData.empty() &&
+        opt.transferDataFile.empty())
+    {
+        std::fputs(
+            "doiplite-cli: flash requires --package-path or transfer data "
+            "(--transfer-data-hex / --transfer-data-file)\n",
+            stderr);
+        return 2;
+    }
+
+    std::vector<uint8_t> payload = opt.transferData;
+    if (payload.empty() && !opt.transferDataFile.empty())
+    {
+        std::string err;
+        if (!loadFileBytes(opt.transferDataFile, &payload, &err))
+        {
+            std::fprintf(stderr, "doiplite-cli: %s\n", err.c_str());
+            return 2;
+        }
+    }
+
+    int code = 0;
+    DoipLiteSession *session = openActivated(opt, "flash", &code);
+    if (!session)
+    {
+        return code;
+    }
+
+    DoipLiteFlashJob job{};
+    job.haveFlashSessionType = opt.haveFlashSessionType ? 1 : 0;
+    job.flashSessionType = opt.flashSessionType;
+    job.haveSecurity = 0;
+    job.haveEraseRoutine = opt.haveFlashEraseRoutine ? 1 : 0;
+    job.eraseRoutineSubFunction = opt.flashEraseRoutineSubFunction;
+    job.eraseRoutineId = opt.flashEraseRoutineId;
+    job.eraseRoutineOption =
+        opt.flashEraseRoutineOption.empty() ? nullptr : opt.flashEraseRoutineOption.data();
+    job.eraseRoutineOptionLen =
+        static_cast<uint32_t>(opt.flashEraseRoutineOption.size());
+    job.dataFormatId = opt.haveDownloadDataFormatId ? opt.downloadDataFormatId : 0;
+    job.addressAndLengthFormatId = opt.downloadAlfid;
+    job.memoryAddress = opt.downloadMemoryAddress;
+    job.memorySize = opt.haveDownloadMemorySize ? opt.downloadMemorySize : 0;
+    if (!payload.empty())
+    {
+        job.data = payload.data();
+        job.dataLen = static_cast<uint32_t>(payload.size());
+    }
+    else
+    {
+        job.packagePath = opt.packagePath.c_str();
+    }
+    job.maxBlockDataCap = opt.haveFlashMaxBlockDataCap ? opt.flashMaxBlockDataCap : 0;
+    job.transferExitParam =
+        opt.transferExitParam.empty() ? nullptr : opt.transferExitParam.data();
+    job.transferExitParamLen = static_cast<uint32_t>(opt.transferExitParam.size());
+    job.haveEcuReset = opt.haveFlashResetType ? 1 : 0;
+    job.resetType = opt.flashResetType;
+    job.timeoutMs = opt.timeoutMs;
+
+    DoipLiteStatus st = DoipLiteFlashStart(session, &job);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr, "doiplite-cli: flash failed: %s\n", DoipLiteStatusString(st));
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    DoipLiteFlashProgress prog{};
+    for (int i = 0; i < 100000; ++i)
+    {
+        st = DoipLiteFlashPoll(session, &prog);
+        if (prog.phase == DOIPLITE_FLASH_DONE || prog.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    if (prog.phase != DOIPLITE_FLASH_DONE || st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: flash failed: %s phase=%d percent=%u\n",
+                     DoipLiteStatusString(st != DOIPLITE_OK ? st : prog.err),
+                     static_cast<int>(prog.phase),
+                     static_cast<unsigned>(prog.percent));
+        DoipLiteClose(session);
+        return 1;
+    }
+    std::printf("flash ok percent=%u\n", static_cast<unsigned>(prog.percent));
+    DoipLiteClose(session);
+    return 0;
+}
+
 const char *requireValue(int argc, char **argv, int *i, const char *name)
 {
     if (*i + 1 >= argc)
@@ -945,6 +1726,203 @@ int main(int argc, char **argv)
             }
             flags.haveTesterPresentSub = true;
         }
+        else if (std::strcmp(arg, "--routine-sub-function") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--routine-sub-function");
+            if (!v)
+            {
+                return 2;
+            }
+            if (!parseU8(v, &flags.routineSubFunction))
+            {
+                std::fputs("doiplite-cli: invalid --routine-sub-function\n", stderr);
+                return 2;
+            }
+            flags.haveRoutineSubFunction = true;
+        }
+        else if (std::strcmp(arg, "--routine-id") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--routine-id");
+            if (!v)
+            {
+                return 2;
+            }
+            if (!parseU16(v, &flags.routineId))
+            {
+                std::fputs("doiplite-cli: invalid --routine-id\n", stderr);
+                return 2;
+            }
+            flags.haveRoutineId = true;
+        }
+        else if (std::strcmp(arg, "--routine-option-hex") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--routine-option-hex");
+            if (!v || !parseHexBytes(v, &flags.routineOption))
+            {
+                std::fputs("doiplite-cli: invalid --routine-option-hex\n", stderr);
+                return 2;
+            }
+        }
+        else if (std::strcmp(arg, "--download-data-format-id") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--download-data-format-id");
+            if (!v || !parseU8(v, &flags.downloadDataFormatId))
+            {
+                std::fputs("doiplite-cli: invalid --download-data-format-id\n", stderr);
+                return 2;
+            }
+            flags.haveDownloadDataFormatId = true;
+        }
+        else if (std::strcmp(arg, "--download-alfid") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--download-alfid");
+            if (!v || !parseU8(v, &flags.downloadAlfid))
+            {
+                std::fputs("doiplite-cli: invalid --download-alfid\n", stderr);
+                return 2;
+            }
+            flags.haveDownloadAlfid = true;
+        }
+        else if (std::strcmp(arg, "--download-memory-address") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--download-memory-address");
+            if (!v || !parseU64(v, &flags.downloadMemoryAddress))
+            {
+                std::fputs("doiplite-cli: invalid --download-memory-address\n", stderr);
+                return 2;
+            }
+            flags.haveDownloadMemoryAddress = true;
+        }
+        else if (std::strcmp(arg, "--download-memory-size") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--download-memory-size");
+            if (!v || !parseU64(v, &flags.downloadMemorySize))
+            {
+                std::fputs("doiplite-cli: invalid --download-memory-size\n", stderr);
+                return 2;
+            }
+            flags.haveDownloadMemorySize = true;
+        }
+        else if (std::strcmp(arg, "--transfer-block-counter") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--transfer-block-counter");
+            if (!v || !parseU8(v, &flags.transferBlockCounter))
+            {
+                std::fputs("doiplite-cli: invalid --transfer-block-counter\n", stderr);
+                return 2;
+            }
+            flags.haveTransferBlockCounter = true;
+        }
+        else if (std::strcmp(arg, "--transfer-data-hex") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--transfer-data-hex");
+            if (!v || !parseHexBytes(v, &flags.transferData))
+            {
+                std::fputs("doiplite-cli: invalid --transfer-data-hex\n", stderr);
+                return 2;
+            }
+        }
+        else if (std::strcmp(arg, "--transfer-data-file") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--transfer-data-file");
+            if (!v)
+            {
+                return 2;
+            }
+            flags.transferDataFile = v;
+        }
+        else if (std::strcmp(arg, "--transfer-exit-param-hex") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--transfer-exit-param-hex");
+            if (!v || !parseHexBytes(v, &flags.transferExitParam))
+            {
+                std::fputs("doiplite-cli: invalid --transfer-exit-param-hex\n", stderr);
+                return 2;
+            }
+            flags.haveTransferExitParam = true;
+        }
+        else if (std::strcmp(arg, "--ecu-reset-type") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--ecu-reset-type");
+            if (!v || !parseU8(v, &flags.ecuResetType))
+            {
+                std::fputs("doiplite-cli: invalid --ecu-reset-type\n", stderr);
+                return 2;
+            }
+            flags.haveEcuResetType = true;
+        }
+        else if (std::strcmp(arg, "--flash-session-type") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--flash-session-type");
+            if (!v || !parseU8(v, &flags.flashSessionType))
+            {
+                std::fputs("doiplite-cli: invalid --flash-session-type\n", stderr);
+                return 2;
+            }
+            flags.haveFlashSessionType = true;
+        }
+        else if (std::strcmp(arg, "--flash-erase-routine-sub-function") == 0)
+        {
+            const char *v =
+                requireValue(argc, argv, &i, "--flash-erase-routine-sub-function");
+            if (!v || !parseU8(v, &flags.flashEraseRoutineSubFunction))
+            {
+                std::fputs(
+                    "doiplite-cli: invalid --flash-erase-routine-sub-function\n", stderr);
+                return 2;
+            }
+            flags.haveFlashEraseRoutine = true;
+        }
+        else if (std::strcmp(arg, "--flash-erase-routine-id") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--flash-erase-routine-id");
+            if (!v || !parseU16(v, &flags.flashEraseRoutineId))
+            {
+                std::fputs("doiplite-cli: invalid --flash-erase-routine-id\n", stderr);
+                return 2;
+            }
+            flags.haveFlashEraseRoutine = true;
+        }
+        else if (std::strcmp(arg, "--flash-erase-routine-option-hex") == 0)
+        {
+            const char *v =
+                requireValue(argc, argv, &i, "--flash-erase-routine-option-hex");
+            if (!v || !parseHexBytes(v, &flags.flashEraseRoutineOption))
+            {
+                std::fputs(
+                    "doiplite-cli: invalid --flash-erase-routine-option-hex\n", stderr);
+                return 2;
+            }
+        }
+        else if (std::strcmp(arg, "--flash-max-block-data-cap") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--flash-max-block-data-cap");
+            if (!v || !parseU32(v, &flags.flashMaxBlockDataCap))
+            {
+                std::fputs("doiplite-cli: invalid --flash-max-block-data-cap\n", stderr);
+                return 2;
+            }
+            flags.haveFlashMaxBlockDataCap = true;
+        }
+        else if (std::strcmp(arg, "--package-path") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--package-path");
+            if (!v)
+            {
+                return 2;
+            }
+            flags.packagePath = v;
+        }
+        else if (std::strcmp(arg, "--flash-reset-type") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--flash-reset-type");
+            if (!v || !parseU8(v, &flags.flashResetType))
+            {
+                std::fputs("doiplite-cli: invalid --flash-reset-type\n", stderr);
+                return 2;
+            }
+            flags.haveFlashResetType = true;
+        }
         else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
         {
             printHelp();
@@ -987,6 +1965,30 @@ int main(int argc, char **argv)
     if (std::strcmp(cmd, "tester-present") == 0)
     {
         return cmdTesterPresent(opt);
+    }
+    if (std::strcmp(cmd, "routine-control") == 0)
+    {
+        return cmdRoutineControl(opt);
+    }
+    if (std::strcmp(cmd, "request-download") == 0)
+    {
+        return cmdRequestDownload(opt);
+    }
+    if (std::strcmp(cmd, "transfer-data") == 0)
+    {
+        return cmdTransferData(opt);
+    }
+    if (std::strcmp(cmd, "request-transfer-exit") == 0)
+    {
+        return cmdRequestTransferExit(opt);
+    }
+    if (std::strcmp(cmd, "ecu-reset") == 0)
+    {
+        return cmdEcuReset(opt);
+    }
+    if (std::strcmp(cmd, "flash") == 0)
+    {
+        return cmdFlash(opt);
     }
 
     std::fprintf(stderr, "doiplite-cli: unknown command: %s\n", cmd);

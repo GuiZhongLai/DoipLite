@@ -198,14 +198,14 @@ int main()
            "read did echo on default entity");
     expect(didLen == 0, "default entity 0x22 echo has empty data record");
 
-    DoipLiteFlashJob job{};
-    job.packagePath = "example.pkg";
-    expect(DoipLiteFlashStart(session, &job) == DOIPLITE_ERR_NOT_IMPLEMENTED,
-           "flash start stub");
+    DoipLiteFlashJob incompleteJob{};
+    incompleteJob.packagePath = "example.pkg";
+    expect(DoipLiteFlashStart(session, &incompleteJob) == DOIPLITE_ERR_INVALID_ARG,
+           "flash start rejects incomplete job");
     DoipLiteFlashProgress progress{};
-    expect(DoipLiteFlashPoll(session, &progress) == DOIPLITE_ERR_NOT_IMPLEMENTED,
-           "flash poll stub");
-    expect(progress.phase == DOIPLITE_FLASH_IDLE, "flash idle");
+    expect(DoipLiteFlashPoll(session, &progress) == DOIPLITE_ERR_INVALID_ARG,
+           "flash poll without start is invalid");
+    expect(progress.phase == DOIPLITE_FLASH_IDLE, "flash idle without start");
     DoipLiteClose(session);
 
     LoopbackEntity::Options nackOpts;
@@ -944,6 +944,327 @@ int main()
     DoipLiteClose(tpSprPendingSession);
     tpSprPendingEntity.stop();
 
+    // --- UDS 0x31 RoutineControl ---
+    expect(UdsRoutineControl(nullptr, 0x01, 0xFF00, nullptr, 0, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "routine control null session");
+    LoopbackEntity::Options rcOpts;
+    rcOpts.supportedRoutineId = 0xFF00; // placeholder only
+    rcOpts.rejectUnknownRoutine = true;
+    LoopbackEntity rcEntity(rcOpts);
+    expect(rcEntity.start(), "start routine-control entity");
+    DoipLiteSession *rcSession = DoipLiteOpen(rcEntity.ip(), rcEntity.port());
+    expect(rcSession != nullptr, "open routine-control entity");
+    expect(DoipLiteRoutingActivation(rcSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate routine-control entity");
+    uint8_t rcBuf[32];
+    uint32_t rcLen = 0;
+    const uint8_t rcOpt[2] = {0xAA, 0xBB};
+    expect(UdsRoutineControl(
+               rcSession, 0x01, 0xFF00, rcOpt, 2, rcBuf, sizeof(rcBuf), &rcLen, 1000) ==
+               DOIPLITE_OK,
+           "routine control success");
+    expect(rcLen >= 4 && rcBuf[0] == 0x71 && rcBuf[1] == 0x01 && rcBuf[2] == 0xFF &&
+               rcBuf[3] == 0x00,
+           "routine control positive 0x71");
+    uint8_t rcNrc[16];
+    uint32_t rcNrcLen = 0;
+    expect(UdsRoutineControl(
+               rcSession, 0x01, 0x0001, nullptr, 0, rcNrc, sizeof(rcNrc), &rcNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "unknown routine is uds nrc");
+    expect(rcNrcLen == 3 && rcNrc[0] == 0x7F && rcNrc[1] == 0x31 && rcNrc[2] == 0x31,
+           "routine nrc 0x31");
+    DoipLiteClose(rcSession);
+    rcEntity.stop();
+
+    // 0x31 with 0x78 pending then success.
+    LoopbackEntity::Options rcPendingOpts;
+    rcPendingOpts.supportedRoutineId = 0xFF00;
+    rcPendingOpts.rejectUnknownRoutine = true;
+    rcPendingOpts.udsPendingCount = 1;
+    rcPendingOpts.udsPendingDelayMs = 30;
+    LoopbackEntity rcPendingEntity(rcPendingOpts);
+    expect(rcPendingEntity.start(), "start routine pending entity");
+    DoipLiteSession *rcPendingSession =
+        DoipLiteOpen(rcPendingEntity.ip(), rcPendingEntity.port());
+    expect(rcPendingSession != nullptr, "open routine pending entity");
+    expect(DoipLiteRoutingActivation(rcPendingSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate routine pending entity");
+    rcLen = 0;
+    expect(UdsRoutineControl(
+               rcPendingSession, 0x01, 0xFF00, nullptr, 0, rcBuf, sizeof(rcBuf), &rcLen, 80) ==
+               DOIPLITE_OK,
+           "routine control waits through 0x78");
+    expect(rcLen >= 4 && rcBuf[0] == 0x71, "routine after pending");
+    DoipLiteClose(rcPendingSession);
+    rcPendingEntity.stop();
+
+    // --- UDS 0x34 RequestDownload ---
+    expect(UdsRequestDownload(
+               nullptr, 0x00, 0x44, 0, 16, nullptr, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "request download null session");
+    LoopbackEntity::Options dlOpts;
+    dlOpts.downloadMaxBlockLength = 0x12;
+    dlOpts.downloadLengthFormatId = 0x20;
+    LoopbackEntity dlEntity(dlOpts);
+    expect(dlEntity.start(), "start request-download entity");
+    DoipLiteSession *dlSession = DoipLiteOpen(dlEntity.ip(), dlEntity.port());
+    expect(dlSession != nullptr, "open request-download entity");
+    expect(DoipLiteRoutingActivation(dlSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate request-download entity");
+    uint8_t dlBuf[32];
+    uint32_t dlLen = 0;
+    uint32_t maxBlock = 0;
+    expect(UdsRequestDownload(
+               dlSession, 0x00, 0x44, 0x1000, 16, &maxBlock, dlBuf, sizeof(dlBuf), &dlLen, 1000) ==
+               DOIPLITE_OK,
+           "request download success");
+    expect(maxBlock == 0x12, "max block length from 0x74");
+    expect(dlLen >= 2 && dlBuf[0] == 0x74, "positive 0x74");
+    DoipLiteClose(dlSession);
+    dlEntity.stop();
+
+    LoopbackEntity::Options dlNrcOpts;
+    dlNrcOpts.rejectRequestDownload = true;
+    LoopbackEntity dlNrcEntity(dlNrcOpts);
+    expect(dlNrcEntity.start(), "start request-download nrc entity");
+    DoipLiteSession *dlNrcSession = DoipLiteOpen(dlNrcEntity.ip(), dlNrcEntity.port());
+    expect(dlNrcSession != nullptr, "open request-download nrc entity");
+    expect(DoipLiteRoutingActivation(dlNrcSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate request-download nrc entity");
+    uint8_t dlNrc[16];
+    uint32_t dlNrcLen = 0;
+    expect(UdsRequestDownload(
+               dlNrcSession, 0x00, 0x44, 0, 8, nullptr, dlNrc, sizeof(dlNrc), &dlNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "request download nrc");
+    expect(dlNrcLen == 3 && dlNrc[0] == 0x7F && dlNrc[1] == 0x34,
+           "download nrc bytes");
+    DoipLiteClose(dlNrcSession);
+    dlNrcEntity.stop();
+
+    // --- UDS 0x36 TransferData / 0x37 RequestTransferExit ---
+    DoipLiteSession *xferSession = DoipLiteOpen(entity.ip(), entity.port());
+    expect(xferSession != nullptr, "open for transfer");
+    expect(DoipLiteRoutingActivation(xferSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate for transfer");
+    const uint8_t blockData[4] = {0x01, 0x02, 0x03, 0x04};
+    uint8_t xferBuf[16];
+    uint32_t xferLen = 0;
+    expect(UdsTransferData(
+               xferSession, 0x01, blockData, 4, xferBuf, sizeof(xferBuf), &xferLen, 1000) ==
+               DOIPLITE_OK,
+           "transfer data success");
+    expect(xferLen >= 2 && xferBuf[0] == 0x76 && xferBuf[1] == 0x01,
+           "transfer data positive 0x76");
+    xferLen = 0;
+    expect(UdsRequestTransferExit(
+               xferSession, nullptr, 0, xferBuf, sizeof(xferBuf), &xferLen, 1000) ==
+               DOIPLITE_OK,
+           "transfer exit success");
+    expect(xferLen >= 1 && xferBuf[0] == 0x77, "transfer exit positive 0x77");
+    DoipLiteClose(xferSession);
+
+    LoopbackEntity::Options xferNrcOpts;
+    xferNrcOpts.udsNrc = 0x24;
+    LoopbackEntity xferNrcEntity(xferNrcOpts);
+    expect(xferNrcEntity.start(), "start transfer nrc entity");
+    DoipLiteSession *xferNrcSession =
+        DoipLiteOpen(xferNrcEntity.ip(), xferNrcEntity.port());
+    expect(xferNrcSession != nullptr, "open transfer nrc entity");
+    expect(DoipLiteRoutingActivation(xferNrcSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate transfer nrc entity");
+    uint8_t xferNrc[16];
+    uint32_t xferNrcLen = 0;
+    expect(UdsTransferData(
+               xferNrcSession, 0x01, blockData, 4, xferNrc, sizeof(xferNrc), &xferNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "transfer data nrc");
+    expect(xferNrc[0] == 0x7F && xferNrc[1] == 0x36 && xferNrc[2] == 0x24,
+           "transfer nrc bytes");
+    DoipLiteClose(xferNrcSession);
+    xferNrcEntity.stop();
+
+    // --- UDS 0x11 ECUReset ---
+    expect(UdsEcuReset(nullptr, 0x01, nullptr, 0, nullptr, 100) == DOIPLITE_ERR_INVALID_ARG,
+           "ecu reset null session");
+    LoopbackEntity::Options resetOpts;
+    resetOpts.supportedResetType = 0x01;
+    resetOpts.rejectUnknownReset = true;
+    LoopbackEntity resetEntity(resetOpts);
+    expect(resetEntity.start(), "start ecu-reset entity");
+    DoipLiteSession *resetSession = DoipLiteOpen(resetEntity.ip(), resetEntity.port());
+    expect(resetSession != nullptr, "open ecu-reset entity");
+    expect(DoipLiteRoutingActivation(resetSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate ecu-reset entity");
+    uint8_t resetBuf[16];
+    uint32_t resetLen = 0;
+    expect(UdsEcuReset(resetSession, 0x01, resetBuf, sizeof(resetBuf), &resetLen, 1000) ==
+               DOIPLITE_OK,
+           "ecu reset success");
+    expect(resetLen == 2 && resetBuf[0] == 0x51 && resetBuf[1] == 0x01,
+           "ecu reset positive 0x51");
+    uint8_t resetNrc[16];
+    uint32_t resetNrcLen = 0;
+    expect(UdsEcuReset(
+               resetSession, 0x03, resetNrc, sizeof(resetNrc), &resetNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "unsupported reset is uds nrc");
+    expect(resetNrc[0] == 0x7F && resetNrc[1] == 0x11 && resetNrc[2] == 0x12,
+           "reset nrc 0x12");
+    resetLen = 99;
+    expect(UdsEcuReset(resetSession, 0x81, resetBuf, sizeof(resetBuf), &resetLen, 400) ==
+               DOIPLITE_OK,
+           "ecu reset suppress silence is success");
+    expect(resetLen == 0, "ecu reset suppress empty response");
+    DoipLiteClose(resetSession);
+    resetEntity.stop();
+
+    // --- Flash orchestration (placeholder / loopback values only) ---
+    expect(DoipLiteSetSeedKeyCallback(nullptr, nullptr, nullptr) == DOIPLITE_ERR_INVALID_ARG,
+           "seed-key null session");
+    LoopbackEntity::Options flashOpts;
+    flashOpts.supportedSession = 0x01;
+    flashOpts.rejectUnknownSession = true;
+    flashOpts.supportedRoutineId = 0xFF00;
+    flashOpts.rejectUnknownRoutine = true;
+    flashOpts.downloadMaxBlockLength = 0x06; // SID+BSC+4 data
+    flashOpts.downloadLengthFormatId = 0x10;
+    flashOpts.supportedResetType = 0x01;
+    flashOpts.rejectUnknownReset = true;
+    LoopbackEntity flashEntity(flashOpts);
+    expect(flashEntity.start(), "start flash entity");
+    DoipLiteSession *flashSession = DoipLiteOpen(flashEntity.ip(), flashEntity.port());
+    expect(flashSession != nullptr, "open flash entity");
+    expect(DoipLiteRoutingActivation(flashSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate flash entity");
+    expect(DoipLiteSetSeedKeyCallback(flashSession, nullptr, nullptr) == DOIPLITE_OK,
+           "seed-key callback stores without wiring");
+
+    const uint8_t flashPayload[8] = {0x10, 0x20, 0x30, 0x40, 0x50, 0x60, 0x70, 0x80};
+    DoipLiteFlashJob flashJob{};
+    flashJob.haveFlashSessionType = 1;
+    flashJob.flashSessionType = 0x01; // placeholder defaultSession, not programming
+    flashJob.haveEraseRoutine = 1;
+    flashJob.eraseRoutineSubFunction = 0x01;
+    flashJob.eraseRoutineId = 0xFF00;
+    flashJob.dataFormatId = 0x00;
+    flashJob.addressAndLengthFormatId = 0x44;
+    flashJob.memoryAddress = 0x00001000;
+    flashJob.memorySize = 0; // derive from payload
+    flashJob.data = flashPayload;
+    flashJob.dataLen = sizeof(flashPayload);
+    flashJob.maxBlockDataCap = 4;
+    flashJob.haveEcuReset = 1;
+    flashJob.resetType = 0x01;
+    flashJob.timeoutMs = 1000;
+
+    expect(DoipLiteFlashStart(flashSession, &flashJob) == DOIPLITE_OK, "flash start ok");
+    DoipLiteFlashProgress flashProg{};
+    int flashPolls = 0;
+    DoipLiteStatus flashSt = DOIPLITE_OK;
+    while (flashPolls < 64)
+    {
+        flashSt = DoipLiteFlashPoll(flashSession, &flashProg);
+        ++flashPolls;
+        if (flashProg.phase == DOIPLITE_FLASH_DONE ||
+            flashProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_OK, "flash poll completes ok");
+    expect(flashProg.phase == DOIPLITE_FLASH_DONE, "flash done");
+    expect(flashProg.percent == 100, "flash 100 percent");
+    expect(flashProg.err == DOIPLITE_OK, "flash err ok");
+    DoipLiteClose(flashSession);
+    flashEntity.stop();
+
+    // Flash with haveSecurity set fails clearly (0x27 not implemented).
+    LoopbackEntity flashSecEntity;
+    expect(flashSecEntity.start(), "start flash security-skip entity");
+    DoipLiteSession *flashSecSession =
+        DoipLiteOpen(flashSecEntity.ip(), flashSecEntity.port());
+    expect(flashSecSession != nullptr, "open flash security entity");
+    expect(DoipLiteRoutingActivation(flashSecSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate flash security entity");
+    DoipLiteFlashJob secJob{};
+    secJob.haveSecurity = 1;
+    secJob.securityLevel = 0x01;
+    secJob.dataFormatId = 0x00;
+    secJob.addressAndLengthFormatId = 0x44;
+    secJob.memoryAddress = 0;
+    secJob.data = flashPayload;
+    secJob.dataLen = sizeof(flashPayload);
+    expect(DoipLiteFlashStart(flashSecSession, &secJob) == DOIPLITE_OK,
+           "flash start with security flag");
+    DoipLiteFlashProgress secProg{};
+    flashSt = DOIPLITE_OK;
+    flashPolls = 0;
+    while (flashPolls < 16)
+    {
+        flashSt = DoipLiteFlashPoll(flashSecSession, &secProg);
+        ++flashPolls;
+        if (secProg.phase == DOIPLITE_FLASH_DONE || secProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_ERR_NOT_IMPLEMENTED, "flash security not implemented");
+    expect(secProg.phase == DOIPLITE_FLASH_FAILED, "flash failed on security");
+    DoipLiteClose(flashSecSession);
+    flashSecEntity.stop();
+
+    // Flash erase step with 0x78 pending.
+    LoopbackEntity::Options flashPendOpts;
+    flashPendOpts.supportedRoutineId = 0xFF00;
+    flashPendOpts.rejectUnknownRoutine = true;
+    flashPendOpts.udsPendingCount = 1;
+    flashPendOpts.udsPendingDelayMs = 30;
+    flashPendOpts.downloadMaxBlockLength = 0x12;
+    LoopbackEntity flashPendEntity(flashPendOpts);
+    expect(flashPendEntity.start(), "start flash pending entity");
+    DoipLiteSession *flashPendSession =
+        DoipLiteOpen(flashPendEntity.ip(), flashPendEntity.port());
+    expect(flashPendSession != nullptr, "open flash pending entity");
+    expect(DoipLiteRoutingActivation(flashPendSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate flash pending entity");
+    DoipLiteFlashJob pendJob{};
+    pendJob.haveEraseRoutine = 1;
+    pendJob.eraseRoutineSubFunction = 0x01;
+    pendJob.eraseRoutineId = 0xFF00;
+    pendJob.dataFormatId = 0x00;
+    pendJob.addressAndLengthFormatId = 0x44;
+    pendJob.memoryAddress = 0;
+    pendJob.data = flashPayload;
+    pendJob.dataLen = 4;
+    pendJob.timeoutMs = 80;
+    expect(DoipLiteFlashStart(flashPendSession, &pendJob) == DOIPLITE_OK,
+           "flash pending start");
+    DoipLiteFlashProgress pendProg{};
+    flashSt = DOIPLITE_OK;
+    flashPolls = 0;
+    while (flashPolls < 64)
+    {
+        flashSt = DoipLiteFlashPoll(flashPendSession, &pendProg);
+        ++flashPolls;
+        if (pendProg.phase == DOIPLITE_FLASH_DONE ||
+            pendProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_OK, "flash pending sequence ok");
+    expect(pendProg.phase == DOIPLITE_FLASH_DONE, "flash pending done");
+    DoipLiteClose(flashPendSession);
+    flashPendEntity.stop();
+
     // A closed TCP port should produce a network error, not hang.
     DoipLiteSession *refused = DoipLiteOpen("127.0.0.1", 1);
     expect(refused != nullptr, "open closed port still allocates");
@@ -1181,6 +1502,34 @@ int main()
     expect(exitCode != 0, "cli read-version timeout is non-zero");
     expect(output.find("timeout") != std::string::npos, "cli mentions timeout");
     cliSilent.stop();
+
+    // CLI flash orchestration with loopback placeholders only.
+    LoopbackEntity::Options cliFlashOpts;
+    cliFlashOpts.downloadMaxBlockLength = 0x12;
+    cliFlashOpts.downloadLengthFormatId = 0x20;
+    LoopbackEntity cliFlash(cliFlashOpts);
+    expect(cliFlash.start(), "start cli flash entity");
+    char flashArgs[512];
+    std::snprintf(flashArgs,
+                  sizeof(flashArgs),
+                  "flash --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--download-alfid 0x44 --download-memory-address 0x1000 "
+                  "--transfer-data-hex 0102030405060708 --timeout-ms 1000",
+                  static_cast<unsigned>(cliFlash.port()));
+    expect(run_cli(flashArgs, &exitCode, &output), "run cli flash");
+    expect(exitCode == 0, "cli flash exits 0");
+    expect(output.find("flash ok") != std::string::npos, "cli flash ok");
+    cliFlash.stop();
+
+    char rcArgs[256];
+    std::snprintf(rcArgs,
+                  sizeof(rcArgs),
+                  "routine-control --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--routine-sub-function 0x01 --routine-id 0xFF00 --timeout-ms 1000",
+                  static_cast<unsigned>(entity.port()));
+    expect(run_cli(rcArgs, &exitCode, &output), "run cli routine-control");
+    expect(exitCode == 0, "cli routine-control exits 0");
+    expect(output.find("71") != std::string::npos, "cli routine prints 0x71");
 #endif
 
     entity.stop();

@@ -53,6 +53,18 @@ public:
         // yields silence on an accepted type; NRC is always returned when rejected.
         uint8_t supportedTesterPresent = 0x00;
         bool rejectUnknownTesterPresent = false;
+        // Fake 0x31 RoutineControl (placeholder IDs only — not plant / OEM).
+        // When rejectUnknownRoutine is set, only supportedRoutineId is accepted.
+        uint16_t supportedRoutineId = 0xFF00;
+        bool rejectUnknownRoutine = false;
+        // Fake 0x34 RequestDownload: positive 0x74 carries this max block length
+        // (ISO: includes SID + blockSequenceCounter). Placeholder only.
+        uint32_t downloadMaxBlockLength = 0x12; // => 0x10 bytes of block data
+        uint8_t downloadLengthFormatId = 0x20;  // 2-byte maxNumberOfBlockLength
+        bool rejectRequestDownload = false;
+        // Fake 0x11 ECUReset: when rejectUnknownReset is set, only supportedResetType.
+        uint8_t supportedResetType = 0x01;
+        bool rejectUnknownReset = false;
         uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
         bool udsDropAfterPending = false;
         // Delay before the final UDS response (and between pendings when gap is 0:
