@@ -27,9 +27,12 @@ DOIPLITE_API DoipLiteStatus UdsReadDataByIdentifier(
  * 收到 UDS 否定应答时返回 DOIPLITE_ERR_UDS_NRC，out 写入完整 0x7F 应答（含 NRC）。
  * 未激活会话由 SendUds 返回 DOIPLITE_ERR_NETWORK。
  *
- * 子功能 bit7（suppressPosRspMsgIndicationBit）置位时：在超时内等待可能的 NRC；
+ * 子功能 bit7（suppressPosRspMsgIndicationBit）置位时：在 P2 窗口内等待可能的 NRC；
  * 若对端保持静默则视为成功（*len 为 0），且不因这次静默关闭 TCP。
- * 若仍收到肯定应答，按成功处理；NRC 路径不变。
+ * 若先收到 0x78，则按 P2* 继续等待最终应答；其后静默视为超时，不是成功。
+ * 若仍收到肯定应答，按成功处理；其它 NRC 路径不变。
+ * 肯定应答若含 P2/P2*（0x50 后至少 4 字节），按 ISO 线格式写入会话时序：
+ * P2 为毫秒，P2* 为 10ms 单位（库内转为毫秒）。
  */
 DOIPLITE_API DoipLiteStatus UdsDiagnosticSessionControl(
     DoipLiteSession *session,

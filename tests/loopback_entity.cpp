@@ -422,14 +422,24 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
     for (uint32_t i = 0; i < options_.udsPendingCount; ++i)
     {
         const std::vector<uint8_t> pending{0x7F, uds[0], 0x78};
-        send_diagnostic_uds(client, addrPrefix, pending, 0);
+        const uint32_t pendingAt =
+            options_.udsPendingGapMs == 0 ? 0 : i * options_.udsPendingGapMs;
+        send_diagnostic_uds(client, addrPrefix, pending, pendingAt);
     }
     if (options_.udsDropAfterPending)
     {
         return;
     }
-    const uint32_t finalDelay =
-        options_.udsPendingCount > 0 ? options_.udsPendingDelayMs : 0;
+    uint32_t finalDelay = 0;
+    if (options_.udsPendingCount > 0)
+    {
+        finalDelay = options_.udsPendingCount * options_.udsPendingGapMs +
+                     options_.udsPendingDelayMs;
+    }
+    else
+    {
+        finalDelay = options_.udsResponseDelayMs;
+    }
 
     std::vector<uint8_t> udsResp;
     if (options_.udsNrc != 0)

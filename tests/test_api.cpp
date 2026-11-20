@@ -513,6 +513,10 @@ int main()
     expect(sessBuf[0] == 0x50 && sessBuf[1] == 0x01, "positive 0x50 + subfunction");
     expect(sessBuf[2] == 0x00 && sessBuf[3] == 0x32, "P2 50 ms");
     expect(sessBuf[4] == 0x01 && sessBuf[5] == 0xF4, "P2* 0x01F4");
+    uint32_t gotP2 = 0;
+    uint32_t gotP2Star = 0;
+    DoipLiteGetP2Timing(sessSession, &gotP2, &gotP2Star);
+    expect(gotP2 == 50 && gotP2Star == 5000, "0x50 timing applied to session");
 
     uint8_t sessNrc[16];
     uint32_t sessNrcLen = 0;
@@ -607,6 +611,98 @@ int main()
            "uds response after suppress-positive");
     DoipLiteClose(sprEcho);
 
+    // --- P2 / P2* timing ---
+    uint32_t openP2 = 0;
+    uint32_t openP2Star = 0;
+    DoipLiteSession *timingProbe = DoipLiteOpen(entity.ip(), entity.port());
+    expect(timingProbe != nullptr, "open timing probe");
+    DoipLiteGetP2Timing(timingProbe, &openP2, &openP2Star);
+    expect(openP2 == DOIPLITE_DEFAULT_P2_MS && openP2Star == DOIPLITE_DEFAULT_P2_STAR_MS,
+           "open session has default P2/P2*");
+    DoipLiteSetP2Timing(timingProbe, 0, 0);
+    DoipLiteGetP2Timing(timingProbe, &openP2, &openP2Star);
+    expect(openP2 == DOIPLITE_DEFAULT_P2_MS && openP2Star == DOIPLITE_DEFAULT_P2_STAR_MS,
+           "SetP2Timing 0 falls back to defaults");
+    DoipLiteClose(timingProbe);
+
+    // First response within P2 succeeds (delayed but under the window).
+    LoopbackEntity::Options p2OkOpts;
+    p2OkOpts.udsResponseDelayMs = 30;
+    LoopbackEntity p2OkEntity(p2OkOpts);
+    expect(p2OkEntity.start(), "start p2-ok entity");
+    DoipLiteSession *p2OkSession = DoipLiteOpen(p2OkEntity.ip(), p2OkEntity.port());
+    expect(p2OkSession != nullptr, "open p2-ok entity");
+    expect(DoipLiteRoutingActivation(p2OkSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate p2-ok entity");
+    DoipLiteSetP2Timing(p2OkSession, 100, 500);
+    udsLen = 0;
+    expect(DoipLiteSendUds(p2OkSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           0) == DOIPLITE_OK,
+           "first response within P2 succeeds");
+    expect(udsLen == 2 && udsResp[0] == 0x7E && udsResp[1] == 0x00,
+           "P2 success response bytes");
+    DoipLiteClose(p2OkSession);
+    p2OkEntity.stop();
+
+    // No response within P2 times out (timeoutMs=0 → session P2).
+    LoopbackEntity::Options p2SilentOpts;
+    p2SilentOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Silent;
+    LoopbackEntity p2SilentEntity(p2SilentOpts);
+    expect(p2SilentEntity.start(), "start p2-silent entity");
+    DoipLiteSession *p2SilentSession =
+        DoipLiteOpen(p2SilentEntity.ip(), p2SilentEntity.port());
+    expect(p2SilentSession != nullptr, "open p2-silent entity");
+    expect(DoipLiteRoutingActivation(p2SilentSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate p2-silent entity");
+    DoipLiteSetP2Timing(p2SilentSession, 80, 500);
+    expect(DoipLiteSendUds(p2SilentSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           0) == DOIPLITE_ERR_TIMEOUT,
+           "no response within P2 times out");
+    DoipLiteClose(p2SilentSession);
+    p2SilentEntity.stop();
+
+    // 0x78 then final within P2* succeeds — delay > first-window P2/timeoutMs
+    // so success proves the wait was reset to full P2*, not leftover P2.
+    LoopbackEntity::Options p2StarOkOpts;
+    p2StarOkOpts.udsPendingCount = 1;
+    p2StarOkOpts.udsPendingDelayMs = 200;
+    LoopbackEntity p2StarOkEntity(p2StarOkOpts);
+    expect(p2StarOkEntity.start(), "start p2*-ok entity");
+    DoipLiteSession *p2StarOkSession =
+        DoipLiteOpen(p2StarOkEntity.ip(), p2StarOkEntity.port());
+    expect(p2StarOkSession != nullptr, "open p2*-ok entity");
+    expect(DoipLiteRoutingActivation(p2StarOkSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate p2*-ok entity");
+    DoipLiteSetP2Timing(p2StarOkSession, 50, 300);
+    udsLen = 0;
+    expect(DoipLiteSendUds(p2StarOkSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           80) == DOIPLITE_OK,
+           "0x78 then final within P2* succeeds");
+    expect(udsLen == 2 && udsResp[0] == 0x7E, "P2* success final response");
+    DoipLiteClose(p2StarOkSession);
+    p2StarOkEntity.stop();
+
+    // 0x78 then silence beyond P2* times out (full P2* window, not leftover P2).
     LoopbackEntity::Options pendingTimeoutOpts;
     pendingTimeoutOpts.udsPendingCount = 1;
     pendingTimeoutOpts.udsDropAfterPending = true;
@@ -618,6 +714,7 @@ int main()
     expect(DoipLiteRoutingActivation(pendingTimeoutSession, 0x0E00, 0x00, nullptr, 0) ==
                DOIPLITE_OK,
            "activate pending-timeout entity");
+    DoipLiteSetP2Timing(pendingTimeoutSession, 50, 100);
     expect(DoipLiteSendUds(pendingTimeoutSession,
                            0x3E,
                            testerPresent,
@@ -625,10 +722,62 @@ int main()
                            udsResp,
                            sizeof(udsResp),
                            &udsLen,
-                           250) == DOIPLITE_ERR_TIMEOUT,
-           "0x78 then silence times out");
+                           0) == DOIPLITE_ERR_TIMEOUT,
+           "0x78 then silence beyond P2* times out");
     DoipLiteClose(pendingTimeoutSession);
     pendingTimeoutEntity.stop();
+
+    // Repeated 0x78: each resets P2*; gaps would exceed a single short leftover window.
+    LoopbackEntity::Options multiPendingOpts;
+    multiPendingOpts.udsPendingCount = 3;
+    multiPendingOpts.udsPendingGapMs = 70;
+    multiPendingOpts.udsPendingDelayMs = 0;
+    LoopbackEntity multiPendingEntity(multiPendingOpts);
+    expect(multiPendingEntity.start(), "start multi-pending entity");
+    DoipLiteSession *multiPendingSession =
+        DoipLiteOpen(multiPendingEntity.ip(), multiPendingEntity.port());
+    expect(multiPendingSession != nullptr, "open multi-pending entity");
+    expect(DoipLiteRoutingActivation(multiPendingSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate multi-pending entity");
+    // First window short; after each 0x78 a full 120ms P2* applies.
+    DoipLiteSetP2Timing(multiPendingSession, 40, 120);
+    udsLen = 0;
+    expect(DoipLiteSendUds(multiPendingSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           0) == DOIPLITE_OK,
+           "repeated 0x78 waits with P2* reset");
+    expect(udsLen == 2 && udsResp[0] == 0x7E, "multi-pending final response");
+    DoipLiteClose(multiPendingSession);
+    multiPendingEntity.stop();
+
+    // suppressPositive + 0x78 then silence: timeout, not success.
+    LoopbackEntity::Options sprPendingOpts;
+    sprPendingOpts.supportedSession = 0x01;
+    sprPendingOpts.rejectUnknownSession = true;
+    sprPendingOpts.udsPendingCount = 1;
+    sprPendingOpts.udsDropAfterPending = true;
+    LoopbackEntity sprPendingEntity(sprPendingOpts);
+    expect(sprPendingEntity.start(), "start suppress-pending entity");
+    DoipLiteSession *sprPendingSession =
+        DoipLiteOpen(sprPendingEntity.ip(), sprPendingEntity.port());
+    expect(sprPendingSession != nullptr, "open suppress-pending entity");
+    expect(DoipLiteRoutingActivation(sprPendingSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate suppress-pending entity");
+    DoipLiteSetP2Timing(sprPendingSession, 50, 100);
+    sessLen = 99;
+    expect(UdsDiagnosticSessionControl(
+               sprPendingSession, 0x81, sessBuf, sizeof(sessBuf), &sessLen, 0) ==
+               DOIPLITE_ERR_TIMEOUT,
+           "suppress after 0x78 silence is timeout not success");
+    DoipLiteClose(sprPendingSession);
+    sprPendingEntity.stop();
 
     // A closed TCP port should produce a network error, not hang.
     DoipLiteSession *refused = DoipLiteOpen("127.0.0.1", 1);

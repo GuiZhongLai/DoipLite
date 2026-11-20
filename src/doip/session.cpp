@@ -41,6 +41,8 @@ struct DoipLiteSession {
     uint16_t entityAddress = 0;
     uint16_t testerAddress = 0;
     bool routingActivated = false;
+    uint32_t p2Ms = DOIPLITE_DEFAULT_P2_MS;
+    uint32_t p2StarMs = DOIPLITE_DEFAULT_P2_STAR_MS;
     doiplite::net::TcpChannel tcp;
 };
 
@@ -409,6 +411,35 @@ uint16_t DoipLiteEntityAddress(const DoipLiteSession *session)
     return session ? session->entityAddress : 0;
 }
 
+void DoipLiteSetP2Timing(DoipLiteSession *session, uint32_t p2Ms, uint32_t p2StarMs)
+{
+    if (!session)
+    {
+        return;
+    }
+    session->p2Ms = p2Ms == 0 ? DOIPLITE_DEFAULT_P2_MS : p2Ms;
+    session->p2StarMs = p2StarMs == 0 ? DOIPLITE_DEFAULT_P2_STAR_MS : p2StarMs;
+}
+
+void DoipLiteGetP2Timing(
+    const DoipLiteSession *session,
+    uint32_t *p2Ms,
+    uint32_t *p2StarMs)
+{
+    if (!session)
+    {
+        return;
+    }
+    if (p2Ms)
+    {
+        *p2Ms = session->p2Ms;
+    }
+    if (p2StarMs)
+    {
+        *p2StarMs = session->p2StarMs;
+    }
+}
+
 DoipLiteStatus DoipLiteSendUdsInternal(
     DoipLiteSession *session,
     uint8_t sid,
@@ -450,10 +481,12 @@ DoipLiteStatus DoipLiteSendUdsInternal(
         return DOIPLITE_ERR_NETWORK;
     }
 
-    const uint32_t budget =
-        timeoutMs == 0 ? DOIPLITE_DEFAULT_TIMEOUT_MS : timeoutMs;
-    const auto deadline =
-        std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
+    // 首窗口：调用方 timeoutMs 可覆盖本请求的 P2；其后每个 0x78 重置为完整 P2*。
+    const uint32_t firstWindowMs =
+        timeoutMs == 0 ? session->p2Ms : timeoutMs;
+    auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(firstWindowMs);
+    bool sawPending = false;
 
     const uint32_t userLen = 1 + dataLen;
     std::vector<uint8_t> body(doiplite::proto::kDiagnosticMessageMinLen + userLen, 0);
@@ -471,8 +504,14 @@ DoipLiteStatus DoipLiteSendUdsInternal(
         body.data(),
         static_cast<uint32_t>(body.size()));
 
+    // 发送使用控制超时量级，避免极短 P2 导致请求写不出去。
+    const uint32_t sendBudgetMs =
+        firstWindowMs < DOIPLITE_DEFAULT_TIMEOUT_MS ? DOIPLITE_DEFAULT_TIMEOUT_MS
+                                                    : firstWindowMs;
+    const auto sendDeadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(sendBudgetMs);
     const DoipLiteStatus sent =
-        session->tcp.send_all(request.data(), request.size(), RemainingMs(deadline));
+        session->tcp.send_all(request.data(), request.size(), RemainingMs(sendDeadline));
     if (sent != DOIPLITE_OK)
     {
         // 发送失败可能已写出部分字节，关闭套接字以免后续错位。
@@ -492,13 +531,18 @@ DoipLiteStatus DoipLiteSendUdsInternal(
             doiplite::proto::kMaxDiagnosticPayload);
         if (rec != DOIPLITE_OK)
         {
-            // 默认：超时或中途失败时可能已消耗部分帧，关闭以免字节流错位。
-            // optionalResponse：请求端允许无肯定应答（suppressPositiveResponse），
-            // 完整静默超时不关连接，避免把合法沉默当成传输失败。
-            if (!(optionalResponse && rec == DOIPLITE_ERR_TIMEOUT))
+            // optionalResponse 且尚未见 0x78：合法静默 → 成功且保持连接。
+            // 已见 0x78 后的静默是 P2* 超时，不是 suppress 成功。
+            if (optionalResponse && rec == DOIPLITE_ERR_TIMEOUT && !sawPending)
             {
-                MarkTransportBroken(session);
+                if (respLen)
+                {
+                    *respLen = 0;
+                }
+                return DOIPLITE_OK;
             }
+            // 默认：超时或中途失败时可能已消耗部分帧，关闭以免字节流错位。
+            MarkTransportBroken(session);
             return rec;
         }
 
@@ -530,7 +574,7 @@ DoipLiteStatus DoipLiteSendUdsInternal(
         }
         if (type != doiplite::proto::kDiagnosticMessage)
         {
-            // 忽略非诊断帧（例如在途控制报文），继续等到超时。
+            // 忽略非诊断帧（例如在途控制报文），继续等到当前窗口结束。
             continue;
         }
         if (payload.size() < doiplite::proto::kDiagnosticMessageMinLen)
@@ -541,10 +585,12 @@ DoipLiteStatus DoipLiteSendUdsInternal(
         const uint8_t *uds = payload.data() + doiplite::proto::kDiagnosticMessageMinLen;
         const uint32_t udsLen = static_cast<uint32_t>(
             payload.size() - doiplite::proto::kDiagnosticMessageMinLen);
-        // ISO 14229 NRC 0x78（requestCorrectlyReceived-ResponsePending）
-        // 不是最终结果，在剩余超时内继续等待最终应答。
+        // ISO 14229 NRC 0x78：不是最终结果；重置为完整 P2* 再等下一应答。
         if (udsLen >= 3 && uds[0] == 0x7F && uds[2] == 0x78)
         {
+            sawPending = true;
+            deadline = std::chrono::steady_clock::now() +
+                       std::chrono::milliseconds(session->p2StarMs);
             continue;
         }
         if (respLen)
