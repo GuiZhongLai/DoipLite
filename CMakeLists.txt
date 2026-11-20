@@ -14,6 +14,8 @@ include(FindAsio)
 add_library(doiplite
     src/status.cpp
     src/net/endpoint.cpp
+    src/net/channel.cpp
+    src/doip/protocol.cpp
     src/doip/session.cpp
     src/uds/read_did.cpp
     src/flash/flash.cpp
@@ -42,7 +44,36 @@ endif()
 
 if(DOIPLITE_BUILD_TESTS)
     enable_testing()
-    add_executable(doiplite-test-api tests/test_api.cpp)
-    target_link_libraries(doiplite-test-api PRIVATE doiplite)
+    add_executable(doiplite-test-api
+        tests/test_api.cpp
+        tests/loopback_entity.cpp
+    )
+    target_link_libraries(doiplite-test-api PRIVATE doiplite doiplite_asio)
+    target_include_directories(doiplite-test-api PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    if(WIN32)
+        target_compile_definitions(doiplite-test-api PRIVATE _WIN32_WINNT=0x0A00)
+        target_link_libraries(doiplite-test-api PRIVATE ws2_32)
+    endif()
+    if(DOIPLITE_BUILD_CLI)
+        target_compile_definitions(doiplite-test-api PRIVATE
+            "DOIPLITE_CLI_PATH=\"$<TARGET_FILE:doiplite-cli>\""
+        )
+        add_dependencies(doiplite-test-api doiplite-cli)
+    endif()
     add_test(NAME doiplite-test-api COMMAND doiplite-test-api)
+
+    add_executable(doiplite-loopback-sim
+        tests/loopback_sim_main.cpp
+        tests/loopback_entity.cpp
+    )
+    target_link_libraries(doiplite-loopback-sim PRIVATE doiplite_asio)
+    target_include_directories(doiplite-loopback-sim PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    if(WIN32)
+        target_compile_definitions(doiplite-loopback-sim PRIVATE _WIN32_WINNT=0x0A00)
+        target_link_libraries(doiplite-loopback-sim PRIVATE ws2_32)
+    endif()
 endif()
