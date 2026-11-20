@@ -74,11 +74,7 @@ DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivationEx(
 /** 最近一次通用 NACK 或路由激活响应码；无记录则为 0。对空会话返回 0。 */
 DOIPLITE_API uint8_t DoipLiteLastDoipCode(const DoipLiteSession *session);
 
-/**
- * 最近一次成功路由激活得到的实体逻辑地址；尚未成功或会话为空则为 0。
- * 传输失败关闭 TCP 并清除激活状态时不会清掉该值；非 0 只表示曾经成功过，
- * 不表示当前仍已激活（是否可发送以路由激活成功且连接仍打开为准）。
- */
+/** 最近一次成功路由激活得到的实体逻辑地址；尚未成功或会话为空则为 0。 */
 DOIPLITE_API uint16_t DoipLiteEntityAddress(const DoipLiteSession *session);
 
 /**
