@@ -674,10 +674,11 @@ int main()
     DoipLiteClose(p2SilentSession);
     p2SilentEntity.stop();
 
-    // 0x78 then final within P2* succeeds.
+    // 0x78 then final within P2* succeeds — delay > first-window P2/timeoutMs
+    // so success proves the wait was reset to full P2*, not leftover P2.
     LoopbackEntity::Options p2StarOkOpts;
     p2StarOkOpts.udsPendingCount = 1;
-    p2StarOkOpts.udsPendingDelayMs = 40;
+    p2StarOkOpts.udsPendingDelayMs = 200;
     LoopbackEntity p2StarOkEntity(p2StarOkOpts);
     expect(p2StarOkEntity.start(), "start p2*-ok entity");
     DoipLiteSession *p2StarOkSession =
@@ -686,7 +687,7 @@ int main()
     expect(DoipLiteRoutingActivation(p2StarOkSession, 0x0E00, 0x00, nullptr, 0) ==
                DOIPLITE_OK,
            "activate p2*-ok entity");
-    DoipLiteSetP2Timing(p2StarOkSession, 50, 200);
+    DoipLiteSetP2Timing(p2StarOkSession, 50, 300);
     udsLen = 0;
     expect(DoipLiteSendUds(p2StarOkSession,
                            0x3E,
@@ -695,7 +696,7 @@ int main()
                            udsResp,
                            sizeof(udsResp),
                            &udsLen,
-                           0) == DOIPLITE_OK,
+                           80) == DOIPLITE_OK,
            "0x78 then final within P2* succeeds");
     expect(udsLen == 2 && udsResp[0] == 0x7E, "P2* success final response");
     DoipLiteClose(p2StarOkSession);

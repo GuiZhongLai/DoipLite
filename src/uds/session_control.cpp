@@ -65,7 +65,8 @@ DoipLiteStatus UdsDiagnosticSessionControl(
     }
 
     // suppressPositive 且对端完全静默：SendUdsInternal 已返回 OK 且 respLen=0。
-    if (respLen == 0)
+    // 非 suppress 时空载荷仍落到下方校验，返回 NETWORK。
+    if (suppressPositive && respLen == 0)
     {
         if (len)
         {
