@@ -1,6 +1,7 @@
 #include "doiplite/doip.h"
 
 #include "protocol.h"
+#include "send_uds_internal.h"
 #include "net/net_internal.h"
 
 #include <chrono>
@@ -386,7 +387,7 @@ uint16_t DoipLiteEntityAddress(const DoipLiteSession *session)
     return session ? session->entityAddress : 0;
 }
 
-DoipLiteStatus DoipLiteSendUds(
+DoipLiteStatus DoipLiteSendUdsInternal(
     DoipLiteSession *session,
     uint8_t sid,
     const uint8_t *data,
@@ -394,7 +395,8 @@ DoipLiteStatus DoipLiteSendUds(
     uint8_t *resp,
     uint32_t respCap,
     uint32_t *respLen,
-    uint32_t timeoutMs)
+    uint32_t timeoutMs,
+    bool optionalResponse)
 {
     if (respLen)
     {
@@ -468,8 +470,13 @@ DoipLiteStatus DoipLiteSendUds(
             doiplite::proto::kMaxDiagnosticPayload);
         if (rec != DOIPLITE_OK)
         {
-            // 超时或中途失败时可能已消耗部分帧，关闭以免字节流错位。
-            MarkTransportBroken(session);
+            // 默认：超时或中途失败时可能已消耗部分帧，关闭以免字节流错位。
+            // optionalResponse：请求端允许无肯定应答（suppressPositiveResponse），
+            // 完整静默超时不关连接，避免把合法沉默当成传输失败。
+            if (!(optionalResponse && rec == DOIPLITE_ERR_TIMEOUT))
+            {
+                MarkTransportBroken(session);
+            }
             return rec;
         }
 
@@ -537,6 +544,20 @@ DoipLiteStatus DoipLiteSendUds(
         }
         return DOIPLITE_OK;
     }
+}
+
+DoipLiteStatus DoipLiteSendUds(
+    DoipLiteSession *session,
+    uint8_t sid,
+    const uint8_t *data,
+    uint32_t dataLen,
+    uint8_t *resp,
+    uint32_t respCap,
+    uint32_t *respLen,
+    uint32_t timeoutMs)
+{
+    return DoipLiteSendUdsInternal(
+        session, sid, data, dataLen, resp, respCap, respLen, timeoutMs, false);
 }
 
 void DoipLiteClose(DoipLiteSession *session)

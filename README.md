@@ -79,7 +79,7 @@ UDS 安全访问的种子—密钥算法不在本库实现，请在调用方注�
 
 库在发现时从临时端口发出请求并收集应答，不强制绑定 13400，因此不会主动监听车辆主动公告（Vehicle Announcement）；向已配置地址发送识别请求即可。
 
-扩展 API：`DoipLiteDiscoverEx`（可指定目的 IPv4 与 UDP 端口）、`DoipLiteRoutingActivationEx`（可指定超时）、`DoipLiteLastDoipCode` / `DoipLiteEntityAddress`。`DoipLiteSendUds` 在已激活会话上发送 0x8001 并等待 UDS 应答；0x8003 / 通用 NACK 的代码可通过 `DoipLiteLastDoipCode` 读取。未连接或尚未路由激活时返回 `DOIPLITE_ERR_NETWORK`；`timeoutMs` 为 0 时使用默认 2000ms。收到 UDS NRC `0x78`（response pending）时继续等待最终应答，直到本次超时。`UdsReadDataByIdentifier` 只通过 `DoipLiteSendUds` 发送 0x22，不自行组装 DoIP 头；成功时写出 DID 之后的数据记录。`UdsDiagnosticSessionControl` 同样只通过 `DoipLiteSendUds` 发送 0x10；成功时写出完整 `0x50` 应答（含子功能及可选 P2/P2*）。发送使用协议版本 `0x02` / `0xFD`，接收兼容 `0x01`、`0x02`、`0x03` 与识别请求常见的 `0xFF`。
+扩展 API：`DoipLiteDiscoverEx`（可指定目的 IPv4 与 UDP 端口）、`DoipLiteRoutingActivationEx`（可指定超时）、`DoipLiteLastDoipCode` / `DoipLiteEntityAddress`。`DoipLiteSendUds` 在已激活会话上发送 0x8001 并等待 UDS 应答；0x8003 / 通用 NACK 的代码可通过 `DoipLiteLastDoipCode` 读取。未连接或尚未路由激活时返回 `DOIPLITE_ERR_NETWORK`；`timeoutMs` 为 0 时使用默认 2000ms。收到 UDS NRC `0x78`（response pending）时继续等待最终应答，直到本次超时。`UdsReadDataByIdentifier` 只通过 `DoipLiteSendUds` 发送 0x22，不自行组装 DoIP 头；成功时写出 DID 之后的数据记录。`UdsDiagnosticSessionControl` 同样只通过 `DoipLiteSendUds` 发送 0x10；成功时写出完整 `0x50` 应答（含子功能及可选 P2/P2*）。子功能 bit7（suppressPositiveResponse）置位时，在超时内等待可能的 NRC；对端静默则视为成功且不关闭 TCP。CLI 的 `--session` / `session_type` 在收窄为 8 位前校验完整宽度，过大的值不会截断成其它子功能。发送使用协议版本 `0x02` / `0xFD`，接收兼容 `0x01`、`0x02`、`0x03` 与识别请求常见的 `0xFF`。
 
 ## 许可证
 

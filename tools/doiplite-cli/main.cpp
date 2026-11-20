@@ -1,5 +1,6 @@
 #include "doiplite/doiplite.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -91,7 +92,10 @@ std::string trim(std::string s)
     return s.substr(begin, end - begin + 1);
 }
 
-bool parseU32(const std::string &text, uint32_t *out)
+// Parse a full-width unsigned value first, then reject anything above max
+// before narrowing. This prevents e.g. 0x100000002 from becoming 0x02 after
+// a uint32_t truncate on platforms where unsigned long is wider than 32 bits.
+bool parseUnsignedMax(const std::string &text, unsigned long max, unsigned long *out)
 {
     if (!out || text.empty())
     {
@@ -99,8 +103,24 @@ bool parseU32(const std::string &text, uint32_t *out)
     }
     char *end = nullptr;
     const bool hex = text.size() > 2 && text[0] == '0' && (text[1] == 'x' || text[1] == 'X');
+    errno = 0;
     const unsigned long value = std::strtoul(text.c_str(), &end, hex ? 16 : 10);
-    if (!end || *end != '\0')
+    if (errno == ERANGE || !end || end == text.c_str() || *end != '\0')
+    {
+        return false;
+    }
+    if (value > max)
+    {
+        return false;
+    }
+    *out = value;
+    return true;
+}
+
+bool parseU32(const std::string &text, uint32_t *out)
+{
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFFFFFFFul, &value))
     {
         return false;
     }
@@ -110,23 +130,23 @@ bool parseU32(const std::string &text, uint32_t *out)
 
 bool parseU16(const std::string &text, uint16_t *out)
 {
-    uint32_t v = 0;
-    if (!parseU32(text, &v) || v > 0xffffu)
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFFFul, &value))
     {
         return false;
     }
-    *out = static_cast<uint16_t>(v);
+    *out = static_cast<uint16_t>(value);
     return true;
 }
 
 bool parseU8(const std::string &text, uint8_t *out)
 {
-    uint32_t v = 0;
-    if (!parseU32(text, &v) || v > 0xffu)
+    unsigned long value = 0;
+    if (!out || !parseUnsignedMax(text, 0xFFul, &value))
     {
         return false;
     }
-    *out = static_cast<uint8_t>(v);
+    *out = static_cast<uint8_t>(value);
     return true;
 }
 
