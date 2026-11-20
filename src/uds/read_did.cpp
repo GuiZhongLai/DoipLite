@@ -8,6 +8,8 @@ DoipLiteStatus UdsReadDataByIdentifier(
     uint32_t *len,
     uint32_t timeoutMs)
 {
+    (void)did;
+    (void)timeoutMs;
     if (!session)
     {
         return DOIPLITE_ERR_INVALID_ARG;
@@ -20,8 +22,6 @@ DoipLiteStatus UdsReadDataByIdentifier(
     {
         *len = 0;
     }
-    uint8_t data[2];
-    data[0] = static_cast<uint8_t>((did >> 8) & 0xff);
-    data[1] = static_cast<uint8_t>(did & 0xff);
-    return DoipLiteSendUds(session, 0x22, data, 2, out, cap, len, timeoutMs);
+    // 0x22 / 读版本留给下一个 PR，本函数暂不调用 DoipLiteSendUds。
+    return DOIPLITE_ERR_NOT_IMPLEMENTED;
 }

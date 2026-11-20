@@ -128,9 +128,39 @@ int main()
     expect(DoipLiteRoutingActivation(session, 0x0E00, 0, nullptr, 4) == DOIPLITE_ERR_INVALID_ARG,
            "activate oem without data");
 
-    expect(DoipLiteSendUds(session, 0x22, nullptr, 0, nullptr, 0, nullptr, 100) ==
-               DOIPLITE_ERR_NOT_IMPLEMENTED,
-           "sendUds still not implemented");
+    expect(DoipLiteSendUds(nullptr, 0x3E, nullptr, 0, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "sendUds null session");
+    expect(DoipLiteSendUds(session, 0x3E, nullptr, 2, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "sendUds dataLen without data");
+    uint8_t tinyReq[1] = {0x00};
+    expect(DoipLiteSendUds(session, 0x3E, tinyReq, 1, nullptr, 8, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "sendUds respCap without buffer");
+
+    DoipLiteSession *notActivated = DoipLiteOpen(entity.ip(), entity.port());
+    expect(notActivated != nullptr, "open without activate");
+    expect(DoipLiteSendUds(notActivated, 0x3E, nullptr, 0, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "sendUds without routing activation is network");
+    DoipLiteClose(notActivated);
+
+    const uint8_t testerPresent[1] = {0x00};
+    uint8_t udsResp[16];
+    uint32_t udsLen = 0;
+    expect(DoipLiteSendUds(session,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_OK,
+           "sendUds positive response");
+    expect(udsLen == 2, "positive uds length");
+    expect(udsResp[0] == 0x7E && udsResp[1] == 0x00, "tester present positive response");
+
     expect(UdsReadDataByIdentifier(session, 0x0000, nullptr, 0, nullptr, 100) ==
                DOIPLITE_ERR_NOT_IMPLEMENTED,
            "read did still not implemented");
@@ -169,6 +199,107 @@ int main()
            "routing timeout");
     DoipLiteClose(hangSession);
     hangEntity.stop();
+
+    LoopbackEntity::Options ackOpts;
+    ackOpts.sendDiagnosticAck = true;
+    LoopbackEntity ackEntity(ackOpts);
+    expect(ackEntity.start(), "start ack entity");
+    DoipLiteSession *ackSession = DoipLiteOpen(ackEntity.ip(), ackEntity.port());
+    expect(ackSession != nullptr, "open ack entity");
+    expect(DoipLiteRoutingActivation(ackSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate ack entity");
+    udsLen = 0;
+    expect(DoipLiteSendUds(ackSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_OK,
+           "sendUds after 0x8002 ACK");
+    expect(udsLen == 2 && udsResp[0] == 0x7E && udsResp[1] == 0x00,
+           "ack path still returns UDS response");
+    DoipLiteClose(ackSession);
+    ackEntity.stop();
+
+    LoopbackEntity::Options diagNackOpts;
+    diagNackOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Nack;
+    diagNackOpts.diagnosticNackCode = 0x03;
+    LoopbackEntity diagNackEntity(diagNackOpts);
+    expect(diagNackEntity.start(), "start diagnostic nack entity");
+    DoipLiteSession *diagNackSession =
+        DoipLiteOpen(diagNackEntity.ip(), diagNackEntity.port());
+    expect(diagNackSession != nullptr, "open diagnostic nack entity");
+    expect(DoipLiteRoutingActivation(diagNackSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate diagnostic nack entity");
+    expect(DoipLiteSendUds(diagNackSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_ERR_DOIP_NACK,
+           "sendUds diagnostic nack");
+    expect(DoipLiteLastDoipCode(diagNackSession) == 0x03, "diagnostic nack code surfaced");
+    DoipLiteClose(diagNackSession);
+    diagNackEntity.stop();
+
+    LoopbackEntity::Options nrcOpts;
+    nrcOpts.udsNrc = 0x11;
+    LoopbackEntity nrcEntity(nrcOpts);
+    expect(nrcEntity.start(), "start uds nrc entity");
+    DoipLiteSession *nrcSession = DoipLiteOpen(nrcEntity.ip(), nrcEntity.port());
+    expect(nrcSession != nullptr, "open nrc entity");
+    expect(DoipLiteRoutingActivation(nrcSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate nrc entity");
+    udsLen = 0;
+    expect(DoipLiteSendUds(nrcSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_ERR_UDS_NRC,
+           "sendUds maps 0x7F to UDS NRC");
+    expect(udsLen == 3, "nrc response length");
+    expect(udsResp[0] == 0x7F && udsResp[1] == 0x3E && udsResp[2] == 0x11,
+           "uds negative response bytes");
+    DoipLiteClose(nrcSession);
+    nrcEntity.stop();
+
+    LoopbackEntity::Options silentDiagOpts;
+    silentDiagOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Silent;
+    LoopbackEntity silentDiag(silentDiagOpts);
+    expect(silentDiag.start(), "start silent diagnostic entity");
+    DoipLiteSession *silentSession = DoipLiteOpen(silentDiag.ip(), silentDiag.port());
+    expect(silentSession != nullptr, "open silent diagnostic entity");
+    expect(DoipLiteRoutingActivation(silentSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate silent diagnostic entity");
+    expect(DoipLiteSendUds(silentSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           250) == DOIPLITE_ERR_TIMEOUT,
+           "sendUds timeout");
+    expect(DoipLiteSendUds(silentSession,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           100) == DOIPLITE_ERR_NETWORK,
+           "sendUds after timeout marks session unusable");
+    DoipLiteClose(silentSession);
+    silentDiag.stop();
 
     // A closed TCP port should produce a network error, not hang.
     DoipLiteSession *refused = DoipLiteOpen("127.0.0.1", 1);

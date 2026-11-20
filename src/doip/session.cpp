@@ -38,8 +38,20 @@ struct DoipLiteSession {
     uint16_t port = DOIPLITE_DEFAULT_TCP_PORT;
     uint8_t lastDoipCode = 0;
     uint16_t entityAddress = 0;
+    uint16_t testerAddress = 0;
+    bool routingActivated = false;
     doiplite::net::TcpChannel tcp;
 };
+
+static void MarkTransportBroken(DoipLiteSession *session)
+{
+    if (!session)
+    {
+        return;
+    }
+    session->tcp.close();
+    session->routingActivated = false;
+}
 
 DoipLiteStatus DoipLiteDiscover(
     uint32_t timeoutMs,
@@ -224,7 +236,8 @@ DoipLiteSession *DoipLiteOpen(const char *ip, uint16_t port)
 static DoipLiteStatus RecvDoipFrame(doiplite::net::TcpChannel &tcp,
                                     std::chrono::steady_clock::time_point deadline,
                                     uint16_t *payloadType,
-                                    std::vector<uint8_t> *payload)
+                                    std::vector<uint8_t> *payload,
+                                    uint32_t maxPayload)
 {
     uint8_t header[doiplite::proto::kHeaderSize];
     DoipLiteStatus st = tcp.recv_exact(header, sizeof(header), RemainingMs(deadline));
@@ -240,7 +253,7 @@ static DoipLiteStatus RecvDoipFrame(doiplite::net::TcpChannel &tcp,
     {
         return DOIPLITE_ERR_NETWORK;
     }
-    if (payloadLen > doiplite::proto::kMaxControlPayload)
+    if (payloadLen > maxPayload)
     {
         return DOIPLITE_ERR_NETWORK;
     }
@@ -329,7 +342,8 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
 
     uint16_t type = 0;
     std::vector<uint8_t> payload;
-    const DoipLiteStatus rec = RecvDoipFrame(session->tcp, deadline, &type, &payload);
+    const DoipLiteStatus rec = RecvDoipFrame(
+        session->tcp, deadline, &type, &payload, doiplite::proto::kMaxControlPayload);
     if (rec != DOIPLITE_OK)
     {
         return rec;
@@ -357,6 +371,8 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
         return DOIPLITE_ERR_DOIP_NACK;
     }
     session->entityAddress = entity;
+    session->testerAddress = testerAddr;
+    session->routingActivated = true;
     return DOIPLITE_OK;
 }
 
@@ -380,8 +396,10 @@ DoipLiteStatus DoipLiteSendUds(
     uint32_t *respLen,
     uint32_t timeoutMs)
 {
-    (void)sid;
-    (void)timeoutMs;
+    if (respLen)
+    {
+        *respLen = 0;
+    }
     if (!session)
     {
         return DOIPLITE_ERR_INVALID_ARG;
@@ -394,11 +412,125 @@ DoipLiteStatus DoipLiteSendUds(
     {
         return DOIPLITE_ERR_INVALID_ARG;
     }
-    if (respLen)
+    // 4-byte addresses + SID + data must fit in the diagnostic payload limit.
+    if (dataLen > doiplite::proto::kMaxDiagnosticPayload -
+                      (doiplite::proto::kDiagnosticMessageMinLen + 1))
     {
-        *respLen = 0;
+        return DOIPLITE_ERR_INVALID_ARG;
     }
-    return DOIPLITE_ERR_NOT_IMPLEMENTED;
+
+    session->lastDoipCode = 0;
+    if (!session->routingActivated || !session->tcp.is_open())
+    {
+        // SendUds 只走已激活的 TCP 会话，未连接或尚未路由激活时返回 NETWORK。
+        return DOIPLITE_ERR_NETWORK;
+    }
+
+    const uint32_t budget =
+        timeoutMs == 0 ? DOIPLITE_DEFAULT_TIMEOUT_MS : timeoutMs;
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(budget);
+
+    const uint32_t userLen = 1 + dataLen;
+    std::vector<uint8_t> body(doiplite::proto::kDiagnosticMessageMinLen + userLen, 0);
+    doiplite::proto::WriteU16Be(body.data(), session->testerAddress);
+    doiplite::proto::WriteU16Be(body.data() + 2, session->entityAddress);
+    body[4] = sid;
+    if (dataLen > 0)
+    {
+        std::memcpy(body.data() + 5, data, dataLen);
+    }
+
+    const std::vector<uint8_t> request = doiplite::proto::EncodeFrame(
+        doiplite::proto::kVersionDefault,
+        doiplite::proto::kDiagnosticMessage,
+        body.data(),
+        static_cast<uint32_t>(body.size()));
+
+    const DoipLiteStatus sent =
+        session->tcp.send_all(request.data(), request.size(), RemainingMs(deadline));
+    if (sent != DOIPLITE_OK)
+    {
+        // 发送失败可能已写出部分字节，关闭套接字以免后续错位。
+        MarkTransportBroken(session);
+        return sent;
+    }
+
+    for (;;)
+    {
+        uint16_t type = 0;
+        std::vector<uint8_t> payload;
+        const DoipLiteStatus rec = RecvDoipFrame(
+            session->tcp,
+            deadline,
+            &type,
+            &payload,
+            doiplite::proto::kMaxDiagnosticPayload);
+        if (rec != DOIPLITE_OK)
+        {
+            // 超时或中途失败时可能已消耗部分帧，关闭以免字节流错位。
+            MarkTransportBroken(session);
+            return rec;
+        }
+
+        if (type == doiplite::proto::kGenericNack)
+        {
+            if (!payload.empty())
+            {
+                session->lastDoipCode = payload[0];
+            }
+            return DOIPLITE_ERR_DOIP_NACK;
+        }
+        if (type == doiplite::proto::kDiagnosticNack)
+        {
+            if (payload.size() < doiplite::proto::kDiagnosticNackMinLen)
+            {
+                return DOIPLITE_ERR_NETWORK;
+            }
+            session->lastDoipCode = payload[4];
+            return DOIPLITE_ERR_DOIP_NACK;
+        }
+        if (type == doiplite::proto::kDiagnosticAck)
+        {
+            if (payload.size() < doiplite::proto::kDiagnosticAckMinLen)
+            {
+                return DOIPLITE_ERR_NETWORK;
+            }
+            session->lastDoipCode = payload[4];
+            continue;
+        }
+        if (type != doiplite::proto::kDiagnosticMessage)
+        {
+            // 忽略非诊断帧（例如在途控制报文），继续等到超时。
+            continue;
+        }
+        if (payload.size() < doiplite::proto::kDiagnosticMessageMinLen)
+        {
+            return DOIPLITE_ERR_NETWORK;
+        }
+
+        const uint8_t *uds = payload.data() + doiplite::proto::kDiagnosticMessageMinLen;
+        const uint32_t udsLen = static_cast<uint32_t>(
+            payload.size() - doiplite::proto::kDiagnosticMessageMinLen);
+        if (respLen)
+        {
+            *respLen = udsLen;
+        }
+        const uint32_t ncopy = udsLen < respCap ? udsLen : respCap;
+        if (ncopy > 0 && resp)
+        {
+            std::memcpy(resp, uds, ncopy);
+        }
+        if (udsLen > respCap)
+        {
+            return DOIPLITE_ERR_INVALID_ARG;
+        }
+        if (udsLen >= 1 && uds[0] == 0x7F)
+        {
+            return DOIPLITE_ERR_UDS_NRC;
+        }
+        return DOIPLITE_OK;
+    }
 }
 
 void DoipLiteClose(DoipLiteSession *session)

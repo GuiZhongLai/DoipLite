@@ -15,6 +15,13 @@
 class LoopbackEntity
 {
 public:
+    enum class DiagnosticMode
+    {
+        Response, // 0x8001 UDS response (optional 0x8002 ACK first)
+        Nack,     // 0x8003 Diagnostic Message NACK
+        Silent    // no diagnostic reply (caller should time out)
+    };
+
     struct Options
     {
         uint16_t logicalAddress = 0x1234;
@@ -23,6 +30,10 @@ public:
         uint8_t routingCode = 0x10;
         bool replyVid = true;
         bool replyRouting = true;
+        DiagnosticMode diagnosticMode = DiagnosticMode::Response;
+        bool sendDiagnosticAck = false;
+        uint8_t diagnosticNackCode = 0x02; // ISO: unknown target address
+        uint8_t udsNrc = 0;                // non-zero: reply 0x7F + SID + NRC
     };
 
     LoopbackEntity();
@@ -47,6 +58,9 @@ private:
     void handle_routing(const std::shared_ptr<Client> &client,
                         const uint8_t *payload,
                         uint32_t payloadLen);
+    void handle_diagnostic(const std::shared_ptr<Client> &client,
+                           const uint8_t *payload,
+                           uint32_t payloadLen);
 
     Options options_;
     asio::io_context io_;
