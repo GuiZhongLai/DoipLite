@@ -19,6 +19,7 @@ add_library(doiplite
     src/doip/session.cpp
     src/uds/read_did.cpp
     src/uds/session_control.cpp
+    src/uds/tester_present.cpp
     src/flash/flash.cpp
 )
 add_library(DoipLite::doiplite ALIAS doiplite)

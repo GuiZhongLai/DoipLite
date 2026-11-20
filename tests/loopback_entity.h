@@ -47,6 +47,12 @@ public:
         bool sessionIncludeTiming = false;
         uint16_t sessionP2 = 0x0032;      // P2Server_max, milliseconds on the wire
         uint16_t sessionP2Star = 0x01F4;  // P2*Server_max, 10 ms units on the wire
+        // Fake 0x3E TesterPresent for tests (not a plant / OEM sub-function).
+        // When rejectUnknownTesterPresent is set, only supportedTesterPresent is
+        // accepted (NRC 0x12 otherwise). suppressPositiveResponse (bit7) still
+        // yields silence on an accepted type; NRC is always returned when rejected.
+        uint8_t supportedTesterPresent = 0x00;
+        bool rejectUnknownTesterPresent = false;
         uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
         bool udsDropAfterPending = false;
         // Delay before the final UDS response (and between pendings when gap is 0:

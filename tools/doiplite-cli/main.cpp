@@ -25,12 +25,14 @@ struct Options
     uint32_t timeoutMs = DOIPLITE_DEFAULT_TIMEOUT_MS;
     uint16_t did = 0;
     uint8_t sessionType = 0;
+    uint8_t testerPresentSub = 0;
     bool havePort = false;
     bool haveTesterAddr = false;
     bool haveActivationType = false;
     bool haveTimeout = false;
     bool haveDid = false;
     bool haveSessionType = false;
+    bool haveTesterPresentSub = false;
 };
 
 void printHelp()
@@ -44,10 +46,11 @@ void printHelp()
         "  doiplite-cli activate  [options]\n"
         "  doiplite-cli read-version [options]\n"
         "  doiplite-cli session [options]\n"
+        "  doiplite-cli tester-present [options]\n"
         "\n"
         "Options:\n"
         "  --config <path>           Load key=value settings (flags override file)\n"
-        "  --ip <ipv4>               Entity IPv4 address (activate / read-version / session)\n"
+        "  --ip <ipv4>               Entity IPv4 address (activate / read-version / session / tester-present)\n"
         "  --broadcast <ipv4>        Discover destination (default: 255.255.255.255)\n"
         "  --port <n>                UDP/TCP port (default: 13400)\n"
         "  --tester-addr <addr>      Tester logical address (hex 0x0E00 or decimal)\n"
@@ -55,6 +58,7 @@ void printHelp()
         "  --timeout-ms <n>          I/O timeout in milliseconds (default: 2000)\n"
         "  --did <id>                Version DID for read-version (hex 0x0001 or decimal)\n"
         "  --session <n>             Session type / sub-function for session (hex 0x01 or decimal)\n"
+        "  --sub-function <n>        Sub-function for tester-present (hex 0x00 or decimal)\n"
         "\n"
         "discover prints the IP and logical address of each responding entity and\n"
         "exits 0 if at least one is found. activate opens a TCP diagnostic connection\n"
@@ -74,10 +78,19 @@ void printHelp()
         "(0x50 + sub-function, and P2/P2* if present). Exit 0 on success. Timeout,\n"
         "DoIP NACK, UDS NRC, or a missing session type exits non-zero with a reason.\n"
         "\n"
-        "If --tester-addr / tester_address is omitted, activate, read-version and session\n"
-        "0x0E00 as an example default from the ISO 13400 external test equipment range.\n"
-        "Replace it with your own tester address; it is not a field value. Do not\n"
-        "hard-code plant IPs, VINs, or secrets. See examples/config/example.conf.\n",
+        "tester-present opens a TCP connection, performs routing activation, and sends\n"
+        "UDS 0x3E TesterPresent. The sub-function must come from --sub-function or\n"
+        "tester_present_sub_function in the config file; there is no library default\n"
+        "(including no zeroSubFunction). On success it prints the raw UDS response\n"
+        "(0x7E + sub-function, or empty when suppressPositiveResponse silence succeeds).\n"
+        "Exit 0 on success. Timeout, DoIP NACK, UDS NRC, or a missing sub-function\n"
+        "exits non-zero with a reason.\n"
+        "\n"
+        "If --tester-addr / tester_address is omitted, activate, read-version, session\n"
+        "and tester-present use 0x0E00 as an example default from the ISO 13400\n"
+        "external test equipment range. Replace it with your own tester address; it is\n"
+        "not a field value. Do not hard-code plant IPs, VINs, or secrets. See\n"
+        "examples/config/example.conf.\n",
         stdout);
 }
 
@@ -222,6 +235,17 @@ bool applyKey(Options *opt, const std::string &key, const std::string &value, st
         opt->haveSessionType = true;
         return true;
     }
+    if (key == "tester_present_sub_function" || key == "sub_function" ||
+        key == "sub-function")
+    {
+        if (value.empty() || !parseU8(value, &opt->testerPresentSub))
+        {
+            *err = "invalid tester_present_sub_function";
+            return false;
+        }
+        opt->haveTesterPresentSub = true;
+        return true;
+    }
     // Unknown keys (e.g. entity_address) are ignored.
     return true;
 }
@@ -309,6 +333,11 @@ void mergeFlags(Options *opt, const Options &flags)
     {
         opt->sessionType = flags.sessionType;
         opt->haveSessionType = true;
+    }
+    if (flags.haveTesterPresentSub)
+    {
+        opt->testerPresentSub = flags.testerPresentSub;
+        opt->haveTesterPresentSub = true;
     }
 }
 
@@ -660,6 +689,108 @@ int cmdSession(const Options &opt)
     return 0;
 }
 
+int cmdTesterPresent(const Options &opt)
+{
+    if (opt.ip.empty())
+    {
+        std::fputs("doiplite-cli: tester-present requires --ip or config ip\n", stderr);
+        return 2;
+    }
+    if (!opt.haveTesterPresentSub)
+    {
+        std::fputs(
+            "doiplite-cli: tester-present requires --sub-function or config "
+            "tester_present_sub_function\n",
+            stderr);
+        return 2;
+    }
+
+    const uint16_t port = opt.havePort ? opt.port : DOIPLITE_DEFAULT_TCP_PORT;
+    DoipLiteSession *session = DoipLiteOpen(opt.ip.c_str(), port);
+    if (!session)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: tester-present failed: invalid_arg (cannot open %s:%u)\n",
+                     opt.ip.c_str(),
+                     static_cast<unsigned>(port));
+        return 2;
+    }
+
+    DoipLiteStatus st = DoipLiteRoutingActivationEx(
+        session, opt.testerAddr, opt.activationType, nullptr, 0, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: tester-present failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    uint8_t buf[64];
+    uint32_t len = 0;
+    st = UdsTesterPresent(
+        session, opt.testerPresentSub, buf, sizeof(buf), &len, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: tester-present failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        else if (st == DOIPLITE_ERR_UDS_NRC)
+        {
+            if (len >= 3)
+            {
+                std::fprintf(stderr, " (nrc 0x%02X)", buf[2]);
+            }
+            else if (len > 0)
+            {
+                std::fprintf(stderr, " (");
+                for (uint32_t i = 0; i < len; ++i)
+                {
+                    if (i > 0)
+                    {
+                        std::fputc(' ', stderr);
+                    }
+                    std::fprintf(stderr, "0x%02X", buf[i]);
+                }
+                std::fputc(')', stderr);
+            }
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    std::printf("tester-present ok sub_function=0x%02X\n",
+                static_cast<unsigned>(opt.testerPresentSub));
+    std::fputs("  uds=", stdout);
+    if (len == 0)
+    {
+        std::fputs("(empty)", stdout);
+    }
+    else
+    {
+        printHexBytes(buf, len);
+    }
+    std::fputc('\n', stdout);
+    if (len >= 2)
+    {
+        std::printf("  sub_function=0x%02X\n", static_cast<unsigned>(buf[1]));
+    }
+
+    DoipLiteClose(session);
+    return 0;
+}
+
 const char *requireValue(int argc, char **argv, int *i, const char *name)
 {
     if (*i + 1 >= argc)
@@ -800,6 +931,20 @@ int main(int argc, char **argv)
             }
             flags.haveSessionType = true;
         }
+        else if (std::strcmp(arg, "--sub-function") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--sub-function");
+            if (!v)
+            {
+                return 2;
+            }
+            if (!parseU8(v, &flags.testerPresentSub))
+            {
+                std::fputs("doiplite-cli: invalid --sub-function\n", stderr);
+                return 2;
+            }
+            flags.haveTesterPresentSub = true;
+        }
         else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
         {
             printHelp();
@@ -838,6 +983,10 @@ int main(int argc, char **argv)
     if (std::strcmp(cmd, "session") == 0)
     {
         return cmdSession(opt);
+    }
+    if (std::strcmp(cmd, "tester-present") == 0)
+    {
+        return cmdTesterPresent(opt);
     }
 
     std::fprintf(stderr, "doiplite-cli: unknown command: %s\n", cmd);

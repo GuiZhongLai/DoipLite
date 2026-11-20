@@ -779,6 +779,171 @@ int main()
     DoipLiteClose(sprPendingSession);
     sprPendingEntity.stop();
 
+    // --- UDS 0x3E TesterPresent ---
+    expect(UdsTesterPresent(nullptr, 0x00, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "tester present null session");
+    uint8_t tpBuf[16];
+
+    DoipLiteSession *tpNotActivated = DoipLiteOpen(entity.ip(), entity.port());
+    expect(tpNotActivated != nullptr, "open for tester-present without activate");
+    expect(UdsTesterPresent(tpNotActivated, 0x00, tpBuf, sizeof(tpBuf), nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "tester present without routing activation is network");
+    DoipLiteClose(tpNotActivated);
+
+    LoopbackEntity::Options tpOpts;
+    tpOpts.supportedTesterPresent = 0x00; // ISO zeroSubFunction example, not a plant value
+    tpOpts.rejectUnknownTesterPresent = true;
+    LoopbackEntity tpEntity(tpOpts);
+    expect(tpEntity.start(), "start tester-present entity");
+    DoipLiteSession *tpSession = DoipLiteOpen(tpEntity.ip(), tpEntity.port());
+    expect(tpSession != nullptr, "open tester-present entity");
+    expect(UdsTesterPresent(tpSession, 0x00, nullptr, sizeof(tpBuf), nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "tester present cap without buffer");
+    expect(DoipLiteRoutingActivation(tpSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate tester-present entity");
+    uint32_t tpLen = 0;
+    std::memset(tpBuf, 0, sizeof(tpBuf));
+    expect(UdsTesterPresent(tpSession, 0x00, tpBuf, sizeof(tpBuf), &tpLen, 1000) ==
+               DOIPLITE_OK,
+           "tester present positive response succeeds");
+    expect(tpLen == 2 && tpBuf[0] == 0x7E && tpBuf[1] == 0x00,
+           "positive 0x7E + sub-function");
+
+    uint8_t tpNrc[16];
+    uint32_t tpNrcLen = 0;
+    expect(UdsTesterPresent(tpSession, 0x01, tpNrc, sizeof(tpNrc), &tpNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "unsupported tester-present sub-function is uds nrc");
+    expect(tpNrcLen == 3, "tester-present nrc length");
+    expect(tpNrc[0] == 0x7F && tpNrc[1] == 0x3E && tpNrc[2] == 0x12,
+           "tester-present nrc 0x12");
+    DoipLiteClose(tpSession);
+    tpEntity.stop();
+
+    // Default loopback echoes 0x3E as 0x7E + sub-function.
+    DoipLiteSession *tpEcho = DoipLiteOpen(entity.ip(), entity.port());
+    expect(tpEcho != nullptr, "open default entity for tester-present echo");
+    expect(DoipLiteRoutingActivation(tpEcho, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for tester-present echo");
+    tpLen = 0;
+    std::memset(tpBuf, 0, sizeof(tpBuf));
+    expect(UdsTesterPresent(tpEcho, 0x00, tpBuf, sizeof(tpBuf), &tpLen, 1000) ==
+               DOIPLITE_OK,
+           "tester present echo on default entity");
+    expect(tpLen == 2 && tpBuf[0] == 0x7E && tpBuf[1] == 0x00,
+           "default entity 0x3E echo is 0x7E + sub-function");
+    DoipLiteClose(tpEcho);
+
+    // suppressPositiveResponse (bit7): silence succeeds and keeps TCP connected.
+    LoopbackEntity::Options tpSprOpts;
+    tpSprOpts.supportedTesterPresent = 0x00;
+    tpSprOpts.rejectUnknownTesterPresent = true;
+    LoopbackEntity tpSprEntity(tpSprOpts);
+    expect(tpSprEntity.start(), "start tester-present suppress entity");
+    DoipLiteSession *tpSprSession = DoipLiteOpen(tpSprEntity.ip(), tpSprEntity.port());
+    expect(tpSprSession != nullptr, "open tester-present suppress entity");
+    expect(DoipLiteRoutingActivation(tpSprSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate tester-present suppress entity");
+    tpLen = 99;
+    std::memset(tpBuf, 0xAA, sizeof(tpBuf));
+    expect(UdsTesterPresent(tpSprSession, 0x80, tpBuf, sizeof(tpBuf), &tpLen, 400) ==
+               DOIPLITE_OK,
+           "tester-present suppress-positive silence is success");
+    expect(tpLen == 0, "tester-present suppress-positive success has empty response");
+    tpLen = 0;
+    std::memset(tpBuf, 0, sizeof(tpBuf));
+    expect(UdsTesterPresent(tpSprSession, 0x00, tpBuf, sizeof(tpBuf), &tpLen, 1000) ==
+               DOIPLITE_OK,
+           "session remains usable after tester-present suppress silence");
+    expect(tpLen == 2 && tpBuf[0] == 0x7E && tpBuf[1] == 0x00,
+           "post-suppress tester-present positive response");
+
+    tpNrcLen = 0;
+    std::memset(tpNrc, 0, sizeof(tpNrc));
+    expect(UdsTesterPresent(tpSprSession, 0x81, tpNrc, sizeof(tpNrc), &tpNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "tester-present suppress-positive still returns nrc");
+    expect(tpNrcLen == 3 && tpNrc[0] == 0x7F && tpNrc[1] == 0x3E && tpNrc[2] == 0x12,
+           "tester-present suppress-positive nrc 0x12 bytes");
+    tpLen = 0;
+    std::memset(tpBuf, 0, sizeof(tpBuf));
+    expect(UdsTesterPresent(tpSprSession, 0x00, tpBuf, sizeof(tpBuf), &tpLen, 1000) ==
+               DOIPLITE_OK,
+           "session remains usable after tester-present suppress nrc");
+    DoipLiteClose(tpSprSession);
+    tpSprEntity.stop();
+
+    // Default entity: suppress silence then a later SendUds still works.
+    DoipLiteSession *tpSprEcho = DoipLiteOpen(entity.ip(), entity.port());
+    expect(tpSprEcho != nullptr, "open default entity for tester-present suppress");
+    expect(DoipLiteRoutingActivation(tpSprEcho, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for tester-present suppress");
+    tpLen = 99;
+    expect(UdsTesterPresent(tpSprEcho, 0x80, tpBuf, sizeof(tpBuf), &tpLen, 400) ==
+               DOIPLITE_OK,
+           "default entity tester-present suppress silence is success");
+    expect(tpLen == 0, "default entity tester-present suppress empty response");
+    udsLen = 0;
+    expect(DoipLiteSendUds(tpSprEcho,
+                           0x3E,
+                           testerPresent,
+                           1,
+                           udsResp,
+                           sizeof(udsResp),
+                           &udsLen,
+                           1000) == DOIPLITE_OK,
+           "sendUds after tester-present suppress still aligned");
+    expect(udsLen == 2 && udsResp[0] == 0x7E && udsResp[1] == 0x00,
+           "uds response after tester-present suppress");
+    DoipLiteClose(tpSprEcho);
+
+    // 0x78 then final response within P2* via UdsTesterPresent.
+    LoopbackEntity::Options tpPendingOkOpts;
+    tpPendingOkOpts.udsPendingCount = 1;
+    tpPendingOkOpts.udsPendingDelayMs = 200;
+    LoopbackEntity tpPendingOkEntity(tpPendingOkOpts);
+    expect(tpPendingOkEntity.start(), "start tester-present pending-ok entity");
+    DoipLiteSession *tpPendingOkSession =
+        DoipLiteOpen(tpPendingOkEntity.ip(), tpPendingOkEntity.port());
+    expect(tpPendingOkSession != nullptr, "open tester-present pending-ok entity");
+    expect(DoipLiteRoutingActivation(tpPendingOkSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate tester-present pending-ok entity");
+    DoipLiteSetP2Timing(tpPendingOkSession, 50, 300);
+    tpLen = 0;
+    expect(UdsTesterPresent(tpPendingOkSession, 0x00, tpBuf, sizeof(tpBuf), &tpLen, 80) ==
+               DOIPLITE_OK,
+           "tester-present 0x78 then final within P2* succeeds");
+    expect(tpLen == 2 && tpBuf[0] == 0x7E && tpBuf[1] == 0x00,
+           "tester-present P2* success final response");
+    DoipLiteClose(tpPendingOkSession);
+    tpPendingOkEntity.stop();
+
+    // suppressPositive + 0x78 then silence: timeout, not success (same SendUds rules).
+    LoopbackEntity::Options tpSprPendingOpts;
+    tpSprPendingOpts.supportedTesterPresent = 0x00;
+    tpSprPendingOpts.rejectUnknownTesterPresent = true;
+    tpSprPendingOpts.udsPendingCount = 1;
+    tpSprPendingOpts.udsDropAfterPending = true;
+    LoopbackEntity tpSprPendingEntity(tpSprPendingOpts);
+    expect(tpSprPendingEntity.start(), "start tester-present suppress-pending entity");
+    DoipLiteSession *tpSprPendingSession =
+        DoipLiteOpen(tpSprPendingEntity.ip(), tpSprPendingEntity.port());
+    expect(tpSprPendingSession != nullptr, "open tester-present suppress-pending entity");
+    expect(DoipLiteRoutingActivation(tpSprPendingSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate tester-present suppress-pending entity");
+    DoipLiteSetP2Timing(tpSprPendingSession, 50, 100);
+    tpLen = 99;
+    expect(UdsTesterPresent(tpSprPendingSession, 0x80, tpBuf, sizeof(tpBuf), &tpLen, 0) ==
+               DOIPLITE_ERR_TIMEOUT,
+           "tester-present suppress after 0x78 silence is timeout not success");
+    DoipLiteClose(tpSprPendingSession);
+    tpSprPendingEntity.stop();
+
     // A closed TCP port should produce a network error, not hang.
     DoipLiteSession *refused = DoipLiteOpen("127.0.0.1", 1);
     expect(refused != nullptr, "open closed port still allocates");
@@ -951,6 +1116,56 @@ int main()
     expect(output.find("uds_nrc") != std::string::npos, "cli session mentions uds_nrc");
     expect(output.find("0x12") != std::string::npos, "cli surfaces nrc 0x12");
     cliSess.stop();
+
+    int missingTpCode = 99;
+    std::string missingTpOut;
+    expect(run_cli("tester-present --ip 127.0.0.1 --port 13400",
+                   &missingTpCode,
+                   &missingTpOut),
+           "run cli tester-present without sub-function");
+    expect(missingTpCode != 0, "cli tester-present without sub-function is non-zero");
+    expect(missingTpOut.find("sub-function") != std::string::npos ||
+               missingTpOut.find("tester_present_sub_function") != std::string::npos,
+           "cli mentions missing tester-present sub-function");
+
+    int overflowTpCode = 0;
+    std::string overflowTpOut;
+    expect(run_cli("tester-present --ip 127.0.0.1 --port 13400 --sub-function 0x100",
+                   &overflowTpCode,
+                   &overflowTpOut),
+           "run cli tester-present oversized hex");
+    expect(overflowTpCode == 2, "cli oversized tester-present sub-function exits 2");
+    expect(overflowTpOut.find("invalid") != std::string::npos,
+           "cli oversized tester-present mentions invalid");
+
+    LoopbackEntity::Options cliTpOpts;
+    cliTpOpts.supportedTesterPresent = 0x00;
+    cliTpOpts.rejectUnknownTesterPresent = true;
+    LoopbackEntity cliTp(cliTpOpts);
+    expect(cliTp.start(), "start cli tester-present entity");
+    char tpArgs[256];
+    std::snprintf(tpArgs,
+                  sizeof(tpArgs),
+                  "tester-present --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--sub-function 0x00 --timeout-ms 1000",
+                  static_cast<unsigned>(cliTp.port()));
+    expect(run_cli(tpArgs, &exitCode, &output), "run cli tester-present");
+    expect(exitCode == 0, "cli tester-present exits 0");
+    expect(output.find("7E 00") != std::string::npos, "cli prints raw 0x7E response");
+    expect(output.find("sub_function=0x00") != std::string::npos,
+           "cli prints tester-present sub-function");
+
+    char tpNrcArgs[256];
+    std::snprintf(tpNrcArgs,
+                  sizeof(tpNrcArgs),
+                  "tester-present --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--sub-function 0x01 --timeout-ms 1000",
+                  static_cast<unsigned>(cliTp.port()));
+    expect(run_cli(tpNrcArgs, &exitCode, &output), "run cli tester-present nrc");
+    expect(exitCode != 0, "cli unsupported tester-present is non-zero");
+    expect(output.find("uds_nrc") != std::string::npos, "cli tester-present mentions uds_nrc");
+    expect(output.find("0x12") != std::string::npos, "cli tester-present surfaces nrc 0x12");
+    cliTp.stop();
 
     LoopbackEntity::Options cliSilentOpts;
     cliSilentOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Silent;

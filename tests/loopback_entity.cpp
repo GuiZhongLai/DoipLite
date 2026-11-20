@@ -502,11 +502,35 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
             // suppress + accepted type: intentional silence (no positive response).
         }
     }
+    else if (uds[0] == 0x3E && options_.rejectUnknownTesterPresent)
+    {
+        if (udsLen < 2)
+        {
+            udsResp = {0x7F, 0x3E, 0x13};
+        }
+        else
+        {
+            const uint8_t requested = uds[1];
+            const uint8_t type = static_cast<uint8_t>(requested & 0x7F);
+            const bool suppress = (requested & 0x80u) != 0;
+            if (type != static_cast<uint8_t>(options_.supportedTesterPresent & 0x7F))
+            {
+                // NRC is always returned, even when suppressPositiveResponse is set.
+                udsResp = {0x7F, 0x3E, 0x12};
+            }
+            else if (!suppress)
+            {
+                udsResp = {0x7E, type};
+            }
+            // suppress + accepted type: intentional silence (no positive response).
+        }
+    }
 
     if (udsResp.empty())
     {
-        // Default 0x10 echo also honors suppressPositiveResponse bit7.
-        if (uds[0] == 0x10 && udsLen >= 2 && (uds[1] & 0x80u) != 0)
+        // Default 0x10 / 0x3E echo also honors suppressPositiveResponse bit7.
+        if ((uds[0] == 0x10 || uds[0] == 0x3E) && udsLen >= 2 &&
+            (uds[1] & 0x80u) != 0)
         {
             return;
         }
