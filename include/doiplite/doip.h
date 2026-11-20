@@ -16,6 +16,18 @@ DOIPLITE_EXTERN_C_BEGIN
  */
 #define DOIPLITE_DEFAULT_TIMEOUT_MS 2000
 
+/**
+ * ISO 14229 默认 P2Server_max（毫秒）：首应答或首个 0x78 的等待窗口。
+ * 量级对齐标准常见默认，不是现场 / OEM 定制值。
+ */
+#define DOIPLITE_DEFAULT_P2_MS 50
+
+/**
+ * ISO 14229 默认 P2*Server_max（毫秒）：收到 0x78 之后到下一应答的等待窗口。
+ * 线格式中 P2* 常以 10ms 为单位；本 API 一律使用毫秒。
+ */
+#define DOIPLITE_DEFAULT_P2_STAR_MS 5000
+
 typedef struct DoipLiteVehicle {
     char ip[64];
     uint16_t tcpPort;
@@ -78,16 +90,39 @@ DOIPLITE_API uint8_t DoipLiteLastDoipCode(const DoipLiteSession *session);
 DOIPLITE_API uint16_t DoipLiteEntityAddress(const DoipLiteSession *session);
 
 /**
+ * 设置会话的 P2 / P2* 等待窗口（毫秒）。对空会话无操作。
+ * p2Ms 或 p2StarMs 为 0 时回落到对应默认值。
+ * 也可由 UdsDiagnosticSessionControl 在收到带时序参数的 0x50 后自动更新。
+ */
+DOIPLITE_API void DoipLiteSetP2Timing(
+    DoipLiteSession *session,
+    uint32_t p2Ms,
+    uint32_t p2StarMs);
+
+/**
+ * 读取会话当前 P2 / P2*（毫秒）。对空会话或空输出指针安全（对应项不写）。
+ */
+DOIPLITE_API void DoipLiteGetP2Timing(
+    const DoipLiteSession *session,
+    uint32_t *p2Ms,
+    uint32_t *p2StarMs);
+
+/**
  * 发送一条 UDS 请求并等待应答。本函数只负责 DoIP 诊断消息托运，
  * 不解释 SID 语义（由 uds 层或调用方组装 sid + data）。
  *
  * 必须先完成路由激活；源/目标逻辑地址取自该次激活（测试仪地址与
  * 实体地址）。未连接或尚未激活时返回 DOIPLITE_ERR_NETWORK。
- * timeoutMs 为 0 时使用 DOIPLITE_DEFAULT_TIMEOUT_MS。
+ *
+ * 等待时序（ISO 14229 P2 / P2*）：
+ * - 首应答（或首个 0x78）窗口：timeoutMs 非 0 时用 timeoutMs，否则用会话 P2；
+ * - 每收到 NRC 0x78（response pending）后，将窗口重置为完整的会话 P2*，
+ *   继续等待下一 0x78 或最终应答；0x78 不是最终 NRC；
+ * - 最终否定应答（其它 NRC）仍映射为 DOIPLITE_ERR_UDS_NRC。
+ *
  * 收到 0x8003 或通用 NACK 时返回 DOIPLITE_ERR_DOIP_NACK，代码见
- * DoipLiteLastDoipCode。UDS 否定应答（0x7F）映射为 DOIPLITE_ERR_UDS_NRC。
- * 其中 NRC 0x78（response pending）视为中间状态，在剩余超时内继续等待最终应答。
- * 接收超时或传输中途失败会关闭 TCP，避免字节流错位；再次发送需重新连接并激活。
+ * DoipLiteLastDoipCode。接收超时或传输中途失败会关闭 TCP，避免字节流错位；
+ * 再次发送需重新连接并激活。
  */
 DOIPLITE_API DoipLiteStatus DoipLiteSendUds(
     DoipLiteSession *session,

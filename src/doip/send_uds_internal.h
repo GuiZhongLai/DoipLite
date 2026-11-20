@@ -3,8 +3,10 @@
 #include "doiplite/doip.h"
 
 // Library-internal SendUds entry used by UDS helpers.
-// When optionalResponse is true, a receive timeout returns DOIPLITE_ERR_TIMEOUT
-// without closing TCP (intentional silence after suppressPositiveResponse).
+// When optionalResponse is true and no 0x78 was seen, a receive timeout is
+// treated as intentional silence: returns DOIPLITE_OK with empty response and
+// does not close TCP (suppressPositiveResponse).
+// After any 0x78, silence is a normal timeout (P2* expiry), not success.
 // Partial-frame / send failures and DoIP NACKs keep the same behavior as the
 // public DoipLiteSendUds path.
 DoipLiteStatus DoipLiteSendUdsInternal(

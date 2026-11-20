@@ -49,16 +49,6 @@ DoipLiteStatus UdsDiagnosticSessionControl(
 
     if (st != DOIPLITE_OK)
     {
-        if (suppressPositive && st == DOIPLITE_ERR_TIMEOUT)
-        {
-            // Bounded wait for a possible NRC elapsed with intentional silence.
-            // Treat as success; transport stays open for the next request.
-            if (len)
-            {
-                *len = 0;
-            }
-            return DOIPLITE_OK;
-        }
         if (st == DOIPLITE_ERR_UDS_NRC)
         {
             if (len)
@@ -74,10 +64,30 @@ DoipLiteStatus UdsDiagnosticSessionControl(
         return st;
     }
 
+    // suppressPositive 且对端完全静默：SendUdsInternal 已返回 OK 且 respLen=0。
+    if (respLen == 0)
+    {
+        if (len)
+        {
+            *len = 0;
+        }
+        return DOIPLITE_OK;
+    }
+
     if (respLen < 2 || resp[0] != 0x50 ||
         (resp[1] & 0x7F) != (sessionType & 0x7F))
     {
         return DOIPLITE_ERR_NETWORK;
+    }
+
+    // ISO 14229：0x50 可选携带 P2Server_max（ms）与 P2*Server_max（10ms 单位）。
+    if (respLen >= 6)
+    {
+        const uint32_t p2Ms =
+            (static_cast<uint32_t>(resp[2]) << 8) | resp[3];
+        const uint32_t p2StarWire =
+            (static_cast<uint32_t>(resp[4]) << 8) | resp[5];
+        DoipLiteSetP2Timing(session, p2Ms, p2StarWire * 10u);
     }
 
     if (len)

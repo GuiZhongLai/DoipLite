@@ -49,7 +49,14 @@ public:
         uint16_t sessionP2Star = 0x01F4;  // P2*Server_max, 10 ms units on the wire
         uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
         bool udsDropAfterPending = false;
+        // Delay before the final UDS response (and between pendings when gap is 0:
+        // all pendings go out immediately, then final waits this long).
         uint32_t udsPendingDelayMs = 20;
+        // Gap between successive 0x78 pendings (and before final after last pending).
+        // When non-zero: pending i at i*gap, final at count*gap + udsPendingDelayMs.
+        uint32_t udsPendingGapMs = 0;
+        // Delay before a non-pending final response (ignored when pendings are used).
+        uint32_t udsResponseDelayMs = 0;
         // First routing request only. Later requests (including a new TCP
         // connection) use the normal routingCode / logicalAddress reply.
         bool routingCloseFirst = false;      // close TCP after the request is read
