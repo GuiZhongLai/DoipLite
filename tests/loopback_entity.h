@@ -50,6 +50,13 @@ public:
         uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
         bool udsDropAfterPending = false;
         uint32_t udsPendingDelayMs = 20;
+        // First routing request only. Later requests (including a new TCP
+        // connection) use the normal routingCode / logicalAddress reply.
+        bool routingCloseFirst = false;      // close TCP after the request is read
+        uint32_t routingDelayMs = 0;         // delay the whole 0x0006, then send it
+        bool routingLateNack = false;        // delayed 0x0006 uses routingLateCode
+        uint8_t routingLateCode = 0x06;      // ISO: unsupported activation type
+        uint32_t routingPayloadDelayMs = 0;  // header now, payload after this delay
     };
 
     LoopbackEntity();
@@ -92,4 +99,5 @@ private:
     std::thread thread_;
     uint16_t port_ = 0;
     bool running_ = false;
+    uint32_t routingRequests_ = 0;
 };

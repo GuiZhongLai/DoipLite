@@ -1,10 +1,12 @@
 #include "doiplite/doiplite.h"
 #include "loopback_entity.h"
 
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #ifdef _WIN32
 #define DOIPLITE_POPEN _popen
@@ -39,6 +41,28 @@ static int cmd_status(int raw)
     }
     return raw;
 #endif
+}
+
+static void expect_fresh_activation(DoipLiteSession *session, const char *prefix)
+{
+    char msg[192];
+    std::snprintf(msg, sizeof(msg), "%s: same-session retry succeeds", prefix);
+    expect(DoipLiteRoutingActivationEx(session, 0x0E00, 0x00, nullptr, 0, 1000) == DOIPLITE_OK,
+           msg);
+    std::snprintf(msg, sizeof(msg), "%s: retry reports fresh success code", prefix);
+    expect(DoipLiteLastDoipCode(session) == 0x10, msg);
+    std::snprintf(msg, sizeof(msg), "%s: retry uses fresh entity address", prefix);
+    expect(DoipLiteEntityAddress(session) == 0x1234, msg);
+
+    const uint8_t testerPresent[1] = {0x00};
+    uint8_t resp[8];
+    uint32_t len = 0;
+    std::snprintf(msg, sizeof(msg), "%s: sendUds after retry is aligned", prefix);
+    expect(DoipLiteSendUds(session, 0x3E, testerPresent, 1, resp, sizeof(resp), &len, 1000) ==
+               DOIPLITE_OK,
+           msg);
+    std::snprintf(msg, sizeof(msg), "%s: uds response after retry", prefix);
+    expect(len == 2 && resp[0] == 0x7E && resp[1] == 0x00, msg);
 }
 
 #ifdef DOIPLITE_CLI_PATH
@@ -206,8 +230,71 @@ int main()
     expect(DoipLiteRoutingActivationEx(hangSession, 0x0E00, 0x00, nullptr, 0, 250) ==
                DOIPLITE_ERR_TIMEOUT,
            "routing timeout");
+    expect(DoipLiteLastDoipCode(hangSession) == 0, "timeout does not invent a doip code");
+    expect(DoipLiteEntityAddress(hangSession) == 0, "timeout does not set entity address");
+    expect(DoipLiteSendUds(hangSession, 0x3E, nullptr, 0, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "sendUds after activation timeout is not activated");
     DoipLiteClose(hangSession);
     hangEntity.stop();
+
+    // Late full 0x0006: a same-session retry must not accept that stale frame.
+    // Timing: client gives up at 200ms, entity emits the NACK at 500ms, the
+    // test waits until that write has happened, then retries.
+    LoopbackEntity::Options lateOpts;
+    lateOpts.routingDelayMs = 500;
+    lateOpts.routingLateNack = true;
+    lateOpts.routingLateCode = 0x06;
+    LoopbackEntity lateEntity(lateOpts);
+    expect(lateEntity.start(), "start late routing entity");
+    DoipLiteSession *lateSession = DoipLiteOpen(lateEntity.ip(), lateEntity.port());
+    expect(lateSession != nullptr, "open late routing entity");
+    expect(DoipLiteRoutingActivationEx(lateSession, 0x0E00, 0x00, nullptr, 0, 200) ==
+               DOIPLITE_ERR_TIMEOUT,
+           "delayed routing response times out");
+    expect(DoipLiteLastDoipCode(lateSession) == 0, "delayed response is not a doip code yet");
+    expect(DoipLiteEntityAddress(lateSession) == 0, "delayed response sets no entity address");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    expect_fresh_activation(lateSession, "late routing response");
+    DoipLiteClose(lateSession);
+    lateEntity.stop();
+
+    // Header now, payload after the client has already timed out.
+    LoopbackEntity::Options partialOpts;
+    partialOpts.routingPayloadDelayMs = 500;
+    LoopbackEntity partialEntity(partialOpts);
+    expect(partialEntity.start(), "start partial routing entity");
+    DoipLiteSession *partialSession =
+        DoipLiteOpen(partialEntity.ip(), partialEntity.port());
+    expect(partialSession != nullptr, "open partial routing entity");
+    expect(DoipLiteRoutingActivationEx(partialSession, 0x0E00, 0x00, nullptr, 0, 200) ==
+               DOIPLITE_ERR_TIMEOUT,
+           "partial routing response times out");
+    expect(DoipLiteLastDoipCode(partialSession) == 0, "partial response has no doip code");
+    expect(DoipLiteEntityAddress(partialSession) == 0, "partial response sets no entity");
+    std::this_thread::sleep_for(std::chrono::milliseconds(800));
+    expect_fresh_activation(partialSession, "partial routing response");
+    DoipLiteClose(partialSession);
+    partialEntity.stop();
+
+    // Peer drops the TCP connection after reading the activation request.
+    LoopbackEntity::Options dropOpts;
+    dropOpts.routingCloseFirst = true;
+    LoopbackEntity dropEntity(dropOpts);
+    expect(dropEntity.start(), "start disconnect routing entity");
+    DoipLiteSession *dropSession = DoipLiteOpen(dropEntity.ip(), dropEntity.port());
+    expect(dropSession != nullptr, "open disconnect routing entity");
+    expect(DoipLiteRoutingActivationEx(dropSession, 0x0E00, 0x00, nullptr, 0, 1000) ==
+               DOIPLITE_ERR_NETWORK,
+           "routing disconnect is network");
+    expect(DoipLiteLastDoipCode(dropSession) == 0, "disconnect does not invent a doip code");
+    expect(DoipLiteEntityAddress(dropSession) == 0, "disconnect sets no entity address");
+    expect(DoipLiteSendUds(dropSession, 0x3E, nullptr, 0, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "sendUds after activation disconnect is not activated");
+    expect_fresh_activation(dropSession, "routing disconnect");
+    DoipLiteClose(dropSession);
+    dropEntity.stop();
 
     LoopbackEntity::Options ackOpts;
     ackOpts.sendDiagnosticAck = true;

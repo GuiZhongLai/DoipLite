@@ -44,6 +44,8 @@ struct DoipLiteSession {
     doiplite::net::TcpChannel tcp;
 };
 
+// 字节流已无法与对端对齐（超时、半帧、断连，或帧头/长度无法解析）。
+// 关闭 TCP 并清除激活，避免同一会话的下一次读复用残留或迟到的字节。
 static void MarkTransportBroken(DoipLiteSession *session)
 {
     if (!session)
@@ -52,6 +54,11 @@ static void MarkTransportBroken(DoipLiteSession *session)
     }
     session->tcp.close();
     session->routingActivated = false;
+}
+
+static bool IsTransportFailure(DoipLiteStatus status)
+{
+    return status == DOIPLITE_ERR_TIMEOUT || status == DOIPLITE_ERR_NETWORK;
 }
 
 DoipLiteStatus DoipLiteDiscover(
@@ -315,6 +322,8 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
             session->tcp.connect(session->ip.c_str(), session->port, RemainingMs(deadline));
         if (conn != DOIPLITE_OK)
         {
+            // connect() 失败时套接字已经关闭，这里只把激活状态收成未激活。
+            MarkTransportBroken(session);
             return conn;
         }
     }
@@ -338,6 +347,11 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
         session->tcp.send_all(request.data(), request.size(), RemainingMs(deadline));
     if (sent != DOIPLITE_OK)
     {
+        // 发送超时或中断时可能已经写出部分请求，不能留着这条 TCP 再读。
+        if (IsTransportFailure(sent))
+        {
+            MarkTransportBroken(session);
+        }
         return sent;
     }
 
@@ -347,11 +361,17 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
         session->tcp, deadline, &type, &payload, doiplite::proto::kMaxControlPayload);
     if (rec != DOIPLITE_OK)
     {
+        // 超时或断连时，头或载荷可能只到了一部分，内核缓冲里也可能还有迟到的帧。
+        if (IsTransportFailure(rec))
+        {
+            MarkTransportBroken(session);
+        }
         return rec;
     }
 
     if (type == doiplite::proto::kGenericNack)
     {
+        // 完整的通用 NACK：流仍然对齐，保留响应码，不把连接当成传输失败关掉。
         if (!payload.empty())
         {
             session->lastDoipCode = payload[0];
@@ -361,6 +381,8 @@ DoipLiteStatus DoipLiteRoutingActivationEx(
     if (type != doiplite::proto::kRoutingResponse ||
         payload.size() < doiplite::proto::kRoutingResponseMinLen)
     {
+        // 帧已读完但不是可用的路由激活响应。后面还可能跟着无法预期的字节。
+        MarkTransportBroken(session);
         return DOIPLITE_ERR_NETWORK;
     }
 
