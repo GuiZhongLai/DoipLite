@@ -7,6 +7,7 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 option(DOIPLITE_BUILD_CLI "Build doiplite-cli" ON)
 option(DOIPLITE_BUILD_TESTS "Build unit/smoke tests" ON)
+option(DOIPLITE_BUILD_EXAMPLES "Build public C API usage examples" ON)
 
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(FindAsio)
@@ -50,6 +51,26 @@ if(DOIPLITE_BUILD_CLI)
     target_link_libraries(doiplite-cli PRIVATE doiplite)
 endif()
 
+if(DOIPLITE_BUILD_EXAMPLES)
+    add_library(doiplite_example_common STATIC
+        examples/common/station_config.cpp
+    )
+    target_include_directories(doiplite_example_common PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}/examples/common
+    )
+    target_link_libraries(doiplite_example_common PUBLIC doiplite)
+
+    add_executable(doiplite-example-read-version
+        examples/read_version/main.cpp
+    )
+    target_link_libraries(doiplite-example-read-version PRIVATE doiplite_example_common)
+
+    add_executable(doiplite-example-flash-job
+        examples/flash_job/main.cpp
+    )
+    target_link_libraries(doiplite-example-flash-job PRIVATE doiplite_example_common)
+endif()
+
 if(DOIPLITE_BUILD_TESTS)
     enable_testing()
     add_executable(doiplite-test-api
@@ -83,5 +104,22 @@ if(DOIPLITE_BUILD_TESTS)
     if(WIN32)
         target_compile_definitions(doiplite-loopback-sim PRIVATE _WIN32_WINNT=0x0A00)
         target_link_libraries(doiplite-loopback-sim PRIVATE ws2_32)
+    endif()
+
+    if(DOIPLITE_BUILD_EXAMPLES)
+        add_executable(doiplite-test-examples
+            tests/test_examples.cpp
+        )
+        target_link_libraries(doiplite-test-examples PRIVATE doiplite_example_common)
+        target_compile_definitions(doiplite-test-examples PRIVATE
+            "DOIPLITE_FLASH_EXAMPLE_PATH=\"$<TARGET_FILE:doiplite-example-flash-job>\""
+            "DOIPLITE_READ_VERSION_EXAMPLE_PATH=\"$<TARGET_FILE:doiplite-example-read-version>\""
+            "DOIPLITE_SOURCE_DIR=\"${CMAKE_CURRENT_SOURCE_DIR}\""
+        )
+        add_dependencies(doiplite-test-examples
+            doiplite-example-flash-job
+            doiplite-example-read-version
+        )
+        add_test(NAME doiplite-test-examples COMMAND doiplite-test-examples)
     endif()
 endif()
