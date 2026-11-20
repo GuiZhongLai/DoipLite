@@ -239,6 +239,13 @@ void LoopbackEntity::arm_accept()
                                     self->body.empty() ? nullptr : self->body.data(),
                                     static_cast<uint32_t>(self->body.size()));
                             }
+                            else if (type == 0x8001)
+                            {
+                                entity->handle_diagnostic(
+                                    self,
+                                    self->body.empty() ? nullptr : self->body.data(),
+                                    static_cast<uint32_t>(self->body.size()));
+                            }
                             (*read_header)();
                         };
                         if (len == 0)
@@ -272,6 +279,70 @@ void LoopbackEntity::handle_routing(const std::shared_ptr<Client> &client,
     WriteU16Be(&body[2], options_.logicalAddress);
     body[4] = options_.routingCode;
     const auto frame = Encode(0x0006, body, 9);
+    asio::error_code ignored;
+    asio::write(client->sock, asio::buffer(frame), ignored);
+}
+
+void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
+                                       const uint8_t *payload,
+                                       uint32_t payloadLen)
+{
+    if (options_.diagnosticMode == DiagnosticMode::Silent || !payload || payloadLen < 4)
+    {
+        return;
+    }
+
+    const uint16_t tester = ReadU16Be(payload);
+    uint8_t addrPrefix[4];
+    WriteU16Be(&addrPrefix[0], options_.logicalAddress);
+    WriteU16Be(&addrPrefix[2], tester);
+
+    if (options_.diagnosticMode == DiagnosticMode::Nack)
+    {
+        uint8_t body[5];
+        std::memcpy(body, addrPrefix, 4);
+        body[4] = options_.diagnosticNackCode;
+        const auto frame = Encode(0x8003, body, 5);
+        asio::error_code ignored;
+        asio::write(client->sock, asio::buffer(frame), ignored);
+        return;
+    }
+
+    if (options_.sendDiagnosticAck)
+    {
+        uint8_t body[5];
+        std::memcpy(body, addrPrefix, 4);
+        body[4] = 0x00;
+        const auto frame = Encode(0x8002, body, 5);
+        asio::error_code ignored;
+        asio::write(client->sock, asio::buffer(frame), ignored);
+    }
+
+    const uint8_t *uds = payload + 4;
+    const uint32_t udsLen = payloadLen - 4;
+    if (udsLen < 1)
+    {
+        return;
+    }
+
+    std::vector<uint8_t> resp;
+    resp.assign(addrPrefix, addrPrefix + 4);
+    if (options_.udsNrc != 0)
+    {
+        resp.push_back(0x7F);
+        resp.push_back(uds[0]);
+        resp.push_back(options_.udsNrc);
+    }
+    else
+    {
+        resp.push_back(static_cast<uint8_t>(uds[0] + 0x40));
+        if (udsLen > 1)
+        {
+            resp.insert(resp.end(), uds + 1, uds + udsLen);
+        }
+    }
+
+    const auto frame = Encode(0x8001, resp.data(), static_cast<uint32_t>(resp.size()));
     asio::error_code ignored;
     asio::write(client->sock, asio::buffer(frame), ignored);
 }

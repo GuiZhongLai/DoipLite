@@ -24,6 +24,9 @@ constexpr uint16_t kVidRequestVin = 0x0003;
 constexpr uint16_t kVidResponse = 0x0004;
 constexpr uint16_t kRoutingRequest = 0x0005;
 constexpr uint16_t kRoutingResponse = 0x0006;
+constexpr uint16_t kDiagnosticMessage = 0x8001;
+constexpr uint16_t kDiagnosticAck = 0x8002;
+constexpr uint16_t kDiagnosticNack = 0x8003;
 
 constexpr uint8_t kRoutingSuccess = 0x10;
 
@@ -31,6 +34,10 @@ constexpr std::size_t kVinLen = 17;
 constexpr std::size_t kVidResponseMinLen = 32; // VIN17 + addr2 + EID6 + GID6 + action1
 constexpr std::size_t kRoutingRequestMinLen = 7;
 constexpr std::size_t kRoutingResponseMinLen = 9;
+constexpr std::size_t kDiagnosticMessageMinLen = 4; // source 2 + target 2
+constexpr std::size_t kDiagnosticAckMinLen = 5;     // source 2 + target 2 + code 1
+constexpr std::size_t kDiagnosticNackMinLen = 5;
+constexpr uint32_t kMaxDiagnosticPayload = 65535;
 
 inline uint8_t InverseVersion(uint8_t version)
 {
