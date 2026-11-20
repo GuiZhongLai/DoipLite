@@ -512,6 +512,12 @@ DoipLiteStatus DoipLiteSendUds(
         const uint8_t *uds = payload.data() + doiplite::proto::kDiagnosticMessageMinLen;
         const uint32_t udsLen = static_cast<uint32_t>(
             payload.size() - doiplite::proto::kDiagnosticMessageMinLen);
+        // ISO 14229 NRC 0x78（requestCorrectlyReceived-ResponsePending）
+        // 不是最终结果，在剩余超时内继续等待最终应答。
+        if (udsLen >= 3 && uds[0] == 0x7F && uds[2] == 0x78)
+        {
+            continue;
+        }
         if (respLen)
         {
             *respLen = udsLen;

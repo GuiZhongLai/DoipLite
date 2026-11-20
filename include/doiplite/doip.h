@@ -81,6 +81,7 @@ DOIPLITE_API uint16_t DoipLiteEntityAddress(const DoipLiteSession *session);
  * timeoutMs 为 0 时使用 DOIPLITE_DEFAULT_TIMEOUT_MS。
  * 收到 0x8003 或通用 NACK 时返回 DOIPLITE_ERR_DOIP_NACK，代码见
  * DoipLiteLastDoipCode。UDS 否定应答（0x7F）映射为 DOIPLITE_ERR_UDS_NRC。
+ * 其中 NRC 0x78（response pending）视为中间状态，在剩余超时内继续等待最终应答。
  * 接收超时或传输中途失败会关闭 TCP，避免字节流错位；再次发送需重新连接并激活。
  */
 DOIPLITE_API DoipLiteStatus DoipLiteSendUds(

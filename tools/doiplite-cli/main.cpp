@@ -22,10 +22,12 @@ struct Options
     uint16_t testerAddr = kExampleTesterAddr;
     uint16_t activationType = kDefaultActivationType;
     uint32_t timeoutMs = DOIPLITE_DEFAULT_TIMEOUT_MS;
+    uint16_t did = 0;
     bool havePort = false;
     bool haveTesterAddr = false;
     bool haveActivationType = false;
     bool haveTimeout = false;
+    bool haveDid = false;
 };
 
 void printHelp()
@@ -47,17 +49,23 @@ void printHelp()
         "  --tester-addr <addr>      Tester logical address (hex 0x0E00 or decimal)\n"
         "  --activation-type <n>     Routing activation type (default: 0x00 ISO default)\n"
         "  --timeout-ms <n>          I/O timeout in milliseconds (default: 2000)\n"
+        "  --did <id>                Version DID for read-version (hex 0x0001 or decimal)\n"
         "\n"
         "discover prints the IP and logical address of each responding entity and\n"
         "exits 0 if at least one is found. activate opens a TCP diagnostic connection\n"
         "and performs routing activation.\n"
         "\n"
-        "If --tester-addr / tester_address is omitted, activate uses 0x0E00 as an\n"
-        "example default from the ISO 13400 external test equipment range. Replace it\n"
-        "with your own tester address; it is not a field value. Do not hard-code plant\n"
-        "IPs, VINs, or secrets. See examples/config/example.conf.\n"
+        "read-version opens a TCP connection, performs routing activation, and sends\n"
+        "UDS 0x22 ReadDataByIdentifier. The DID must come from --did or version_did in\n"
+        "the config file; there is no library default. On success it prints the raw\n"
+        "UDS response and hex of the data record; if the data is printable text, it\n"
+        "also prints the version string. Exit 0 on success. Timeout, DoIP NACK, UDS\n"
+        "NRC, or a missing DID exits non-zero with a reason.\n"
         "\n"
-        "read-version is reserved for M2 and is not implemented yet.\n",
+        "If --tester-addr / tester_address is omitted, activate and read-version use\n"
+        "0x0E00 as an example default from the ISO 13400 external test equipment range.\n"
+        "Replace it with your own tester address; it is not a field value. Do not\n"
+        "hard-code plant IPs, VINs, or secrets. See examples/config/example.conf.\n",
         stdout);
 }
 
@@ -152,7 +160,17 @@ bool applyKey(Options *opt, const std::string &key, const std::string &value, st
         opt->haveTimeout = true;
         return true;
     }
-    // Unknown keys (e.g. version_did, entity_address) are ignored.
+    if (key == "version_did" || key == "did")
+    {
+        if (value.empty() || !parseU16(value, &opt->did))
+        {
+            *err = "invalid version_did";
+            return false;
+        }
+        opt->haveDid = true;
+        return true;
+    }
+    // Unknown keys (e.g. entity_address) are ignored.
     return true;
 }
 
@@ -229,6 +247,11 @@ void mergeFlags(Options *opt, const Options &flags)
     {
         opt->timeoutMs = flags.timeoutMs;
         opt->haveTimeout = true;
+    }
+    if (flags.haveDid)
+    {
+        opt->did = flags.did;
+        opt->haveDid = true;
     }
 }
 
@@ -322,6 +345,154 @@ int cmdActivate(const Options &opt)
                 static_cast<unsigned>(port),
                 static_cast<unsigned>(opt.testerAddr),
                 static_cast<unsigned>(DoipLiteEntityAddress(session)));
+    DoipLiteClose(session);
+    return 0;
+}
+
+void printHexBytes(const uint8_t *data, uint32_t len)
+{
+    for (uint32_t i = 0; i < len; ++i)
+    {
+        if (i > 0)
+        {
+            std::fputc(' ', stdout);
+        }
+        std::printf("%02X", data[i]);
+    }
+}
+
+bool isPrintableData(const uint8_t *data, uint32_t len, std::string *text)
+{
+    uint32_t n = len;
+    while (n > 0 && data[n - 1] == 0)
+    {
+        --n;
+    }
+    std::string out;
+    out.reserve(n);
+    for (uint32_t i = 0; i < n; ++i)
+    {
+        const unsigned char c = data[i];
+        if (c < 32 || c > 126)
+        {
+            return false;
+        }
+        out.push_back(static_cast<char>(c));
+    }
+    if (text)
+    {
+        *text = out;
+    }
+    return n > 0;
+}
+
+int cmdReadVersion(const Options &opt)
+{
+    if (opt.ip.empty())
+    {
+        std::fputs("doiplite-cli: read-version requires --ip or config ip\n", stderr);
+        return 2;
+    }
+    if (!opt.haveDid)
+    {
+        std::fputs("doiplite-cli: read-version requires --did or config version_did\n", stderr);
+        return 2;
+    }
+
+    const uint16_t port = opt.havePort ? opt.port : DOIPLITE_DEFAULT_TCP_PORT;
+    DoipLiteSession *session = DoipLiteOpen(opt.ip.c_str(), port);
+    if (!session)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: read-version failed: invalid_arg (cannot open %s:%u)\n",
+                     opt.ip.c_str(),
+                     static_cast<unsigned>(port));
+        return 2;
+    }
+
+    DoipLiteStatus st = DoipLiteRoutingActivationEx(
+        session, opt.testerAddr, opt.activationType, nullptr, 0, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: read-version failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    uint8_t buf[4096];
+    uint32_t len = 0;
+    st = UdsReadDataByIdentifier(session, opt.did, buf, sizeof(buf), &len, opt.timeoutMs);
+    if (st != DOIPLITE_OK)
+    {
+        std::fprintf(stderr,
+                     "doiplite-cli: read-version failed: %s",
+                     DoipLiteStatusString(st));
+        if (st == DOIPLITE_ERR_DOIP_NACK)
+        {
+            std::fprintf(stderr, " (response code 0x%02X)", DoipLiteLastDoipCode(session));
+        }
+        else if (st == DOIPLITE_ERR_UDS_NRC)
+        {
+            if (len >= 3)
+            {
+                std::fprintf(stderr, " (nrc 0x%02X)", buf[2]);
+            }
+            else if (len > 0)
+            {
+                std::fprintf(stderr, " (");
+                for (uint32_t i = 0; i < len; ++i)
+                {
+                    if (i > 0)
+                    {
+                        std::fputc(' ', stderr);
+                    }
+                    std::fprintf(stderr, "0x%02X", buf[i]);
+                }
+                std::fputc(')', stderr);
+            }
+        }
+        std::fputc('\n', stderr);
+        DoipLiteClose(session);
+        return 1;
+    }
+
+    const uint8_t udsHead[3] = {
+        0x62,
+        static_cast<uint8_t>((opt.did >> 8) & 0xff),
+        static_cast<uint8_t>(opt.did & 0xff),
+    };
+    std::printf("read-version ok did=0x%04X\n", static_cast<unsigned>(opt.did));
+    std::fputs("  uds=", stdout);
+    printHexBytes(udsHead, 3);
+    if (len > 0)
+    {
+        std::fputc(' ', stdout);
+        printHexBytes(buf, len);
+    }
+    std::fputc('\n', stdout);
+    std::fputs("  hex=", stdout);
+    if (len == 0)
+    {
+        std::fputs("(empty)", stdout);
+    }
+    else
+    {
+        printHexBytes(buf, len);
+    }
+    std::fputc('\n', stdout);
+    std::string text;
+    if (isPrintableData(buf, len, &text))
+    {
+        std::printf("  version=%s\n", text.c_str());
+    }
+
     DoipLiteClose(session);
     return 0;
 }
@@ -438,6 +609,20 @@ int main(int argc, char **argv)
             }
             flags.haveTimeout = true;
         }
+        else if (std::strcmp(arg, "--did") == 0)
+        {
+            const char *v = requireValue(argc, argv, &i, "--did");
+            if (!v)
+            {
+                return 2;
+            }
+            if (!parseU16(v, &flags.did))
+            {
+                std::fputs("doiplite-cli: invalid --did\n", stderr);
+                return 2;
+            }
+            flags.haveDid = true;
+        }
         else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
         {
             printHelp();
@@ -471,10 +656,7 @@ int main(int argc, char **argv)
     }
     if (std::strcmp(cmd, "read-version") == 0)
     {
-        std::fprintf(stderr,
-                     "doiplite-cli: 'read-version' is not implemented yet (%s)\n",
-                     DoipLiteStatusString(DOIPLITE_ERR_NOT_IMPLEMENTED));
-        return 1;
+        return cmdReadVersion(opt);
     }
 
     std::fprintf(stderr, "doiplite-cli: unknown command: %s\n", cmd);
