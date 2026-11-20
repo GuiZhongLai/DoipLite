@@ -71,9 +71,10 @@ DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivation(
  * activationType 按协议取低 8 位。
  *
  * 超时或网络失败（含半帧、断连，以及无法解析的帧）会关闭 TCP，并清除
- * 本会话的激活状态。同一会话再次调用会重新连接，不会把上一次迟到或
- * 残留的应答当成新的结果。完整的路由激活否定或通用 NACK 仍返回
- * DOIPLITE_ERR_DOIP_NACK，响应码保留在 DoipLiteLastDoipCode，连接保持打开。
+ * 本会话的激活状态与 EntityAddress。同一会话再次调用会重新连接，不会把
+ * 上一次迟到或残留的应答当成新的结果，也不会复用陈旧实体地址。完整的
+ * 路由激活否定或通用 NACK 仍返回 DOIPLITE_ERR_DOIP_NACK，响应码保留在
+ * DoipLiteLastDoipCode，连接保持打开。
  */
 DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivationEx(
     DoipLiteSession *session,
@@ -86,7 +87,10 @@ DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivationEx(
 /** 最近一次通用 NACK 或路由激活响应码；无记录则为 0。对空会话返回 0。 */
 DOIPLITE_API uint8_t DoipLiteLastDoipCode(const DoipLiteSession *session);
 
-/** 最近一次成功路由激活得到的实体逻辑地址；尚未成功或会话为空则为 0。 */
+/**
+ * 最近一次成功路由激活得到的实体逻辑地址；尚未成功、会话为空、或诊断 TCP
+ * 已因传输失败/超时关闭时为 0（避免重连复用陈旧地址）。
+ */
 DOIPLITE_API uint16_t DoipLiteEntityAddress(const DoipLiteSession *session);
 
 /**
@@ -121,8 +125,8 @@ DOIPLITE_API void DoipLiteGetP2Timing(
  * - 最终否定应答（其它 NRC）仍映射为 DOIPLITE_ERR_UDS_NRC。
  *
  * 收到 0x8003 或通用 NACK 时返回 DOIPLITE_ERR_DOIP_NACK，代码见
- * DoipLiteLastDoipCode。接收超时或传输中途失败会关闭 TCP，避免字节流错位；
- * 再次发送需重新连接并激活。
+ * DoipLiteLastDoipCode。接收超时或传输中途失败会关闭 TCP 并清除激活状态
+ * 与 EntityAddress，避免字节流错位与陈旧地址；再次发送需重新连接并激活。
  */
 DOIPLITE_API DoipLiteStatus DoipLiteSendUds(
     DoipLiteSession *session,

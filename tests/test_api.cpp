@@ -1,12 +1,14 @@
 #include "doiplite/doiplite.h"
 #include "loopback_entity.h"
 
+#include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 #ifdef _WIN32
 #define DOIPLITE_POPEN _popen
@@ -41,6 +43,11 @@ static int cmd_status(int raw)
     }
     return raw;
 #endif
+}
+
+static std::size_t count_sid(const std::vector<uint8_t> &sids, uint8_t sid)
+{
+    return static_cast<std::size_t>(std::count(sids.begin(), sids.end(), sid));
 }
 
 static void expect_fresh_activation(DoipLiteSession *session, const char *prefix)
@@ -376,6 +383,8 @@ int main()
     expect(DoipLiteRoutingActivation(silentSession, 0x0E00, 0x00, nullptr, 0) ==
                DOIPLITE_OK,
            "activate silent diagnostic entity");
+    expect(DoipLiteEntityAddress(silentSession) == 0x1234,
+           "entity address set after successful activation");
     expect(DoipLiteSendUds(silentSession,
                            0x3E,
                            testerPresent,
@@ -385,6 +394,8 @@ int main()
                            &udsLen,
                            250) == DOIPLITE_ERR_TIMEOUT,
            "sendUds timeout");
+    expect(DoipLiteEntityAddress(silentSession) == 0,
+           "entity address cleared on TCP close after transport timeout");
     expect(DoipLiteSendUds(silentSession,
                            0x3E,
                            testerPresent,
@@ -1001,6 +1012,84 @@ int main()
     DoipLiteClose(rcPendingSession);
     rcPendingEntity.stop();
 
+    // 0x31 suppressPositiveResponse (bit7): silence succeeds and keeps TCP connected.
+    LoopbackEntity::Options rcSprOpts;
+    rcSprOpts.supportedRoutineId = 0xFF00;
+    rcSprOpts.rejectUnknownRoutine = true;
+    LoopbackEntity rcSprEntity(rcSprOpts);
+    expect(rcSprEntity.start(), "start routine-control suppress entity");
+    DoipLiteSession *rcSprSession = DoipLiteOpen(rcSprEntity.ip(), rcSprEntity.port());
+    expect(rcSprSession != nullptr, "open routine-control suppress entity");
+    expect(DoipLiteRoutingActivation(rcSprSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate routine-control suppress entity");
+    rcLen = 99;
+    expect(UdsRoutineControl(
+               rcSprSession, 0x81, 0xFF00, nullptr, 0, rcBuf, sizeof(rcBuf), &rcLen, 400) ==
+               DOIPLITE_OK,
+           "routine-control suppress-positive silence is success");
+    expect(rcLen == 0, "routine-control suppress-positive success has empty response");
+    rcLen = 0;
+    expect(UdsRoutineControl(
+               rcSprSession, 0x01, 0xFF00, nullptr, 0, rcBuf, sizeof(rcBuf), &rcLen, 1000) ==
+               DOIPLITE_OK,
+           "session remains usable after routine-control suppress silence");
+    expect(rcLen >= 4 && rcBuf[0] == 0x71, "post-suppress routine-control positive response");
+    // suppress + rejected routine still surfaces NRC.
+    rcNrcLen = 0;
+    expect(UdsRoutineControl(
+               rcSprSession, 0x81, 0x0001, nullptr, 0, rcNrc, sizeof(rcNrc), &rcNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "routine-control suppress-positive still returns nrc");
+    expect(rcNrcLen == 3 && rcNrc[0] == 0x7F && rcNrc[1] == 0x31 && rcNrc[2] == 0x31,
+           "routine-control suppress-positive nrc 0x31 bytes");
+    DoipLiteClose(rcSprSession);
+    rcSprEntity.stop();
+
+    // Default entity: 0x31 suppress silence then a later SendUds still works.
+    DoipLiteSession *rcSprEcho = DoipLiteOpen(entity.ip(), entity.port());
+    expect(rcSprEcho != nullptr, "open default entity for routine-control suppress");
+    expect(DoipLiteRoutingActivation(rcSprEcho, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for routine-control suppress");
+    rcLen = 99;
+    expect(UdsRoutineControl(
+               rcSprEcho, 0x81, 0xFF00, nullptr, 0, rcBuf, sizeof(rcBuf), &rcLen, 400) ==
+               DOIPLITE_OK,
+           "default entity routine-control suppress silence is success");
+    expect(rcLen == 0, "default entity routine-control suppress empty response");
+    {
+        const uint8_t tp[1] = {0x00};
+        uint8_t echoBuf[8];
+        uint32_t echoLen = 0;
+        expect(DoipLiteSendUds(rcSprEcho, 0x3E, tp, 1, echoBuf, sizeof(echoBuf), &echoLen, 1000) ==
+                   DOIPLITE_OK,
+               "sendUds after routine-control suppress still aligned");
+        expect(echoLen == 2 && echoBuf[0] == 0x7E, "uds response after routine-control suppress");
+    }
+    DoipLiteClose(rcSprEcho);
+
+    // suppressPositive + 0x78 then silence: timeout, not success.
+    LoopbackEntity::Options rcSprPendingOpts;
+    rcSprPendingOpts.supportedRoutineId = 0xFF00;
+    rcSprPendingOpts.rejectUnknownRoutine = true;
+    rcSprPendingOpts.udsPendingCount = 1;
+    rcSprPendingOpts.udsDropAfterPending = true;
+    LoopbackEntity rcSprPendingEntity(rcSprPendingOpts);
+    expect(rcSprPendingEntity.start(), "start routine-control suppress-pending entity");
+    DoipLiteSession *rcSprPendingSession =
+        DoipLiteOpen(rcSprPendingEntity.ip(), rcSprPendingEntity.port());
+    expect(rcSprPendingSession != nullptr, "open routine-control suppress-pending entity");
+    expect(DoipLiteRoutingActivation(rcSprPendingSession, 0x0E00, 0x00, nullptr, 0) ==
+               DOIPLITE_OK,
+           "activate routine-control suppress-pending entity");
+    DoipLiteSetP2Timing(rcSprPendingSession, 50, 200);
+    rcLen = 99;
+    expect(UdsRoutineControl(
+               rcSprPendingSession, 0x81, 0xFF00, nullptr, 0, rcBuf, sizeof(rcBuf), &rcLen, 0) ==
+               DOIPLITE_ERR_TIMEOUT,
+           "routine-control suppress after 0x78 silence is timeout not success");
+    DoipLiteClose(rcSprPendingSession);
+    rcSprPendingEntity.stop();
+
     // --- UDS 0x34 RequestDownload ---
     expect(UdsRequestDownload(
                nullptr, 0x00, 0x44, 0, 16, nullptr, nullptr, 0, nullptr, 100) ==
@@ -1264,6 +1353,228 @@ int main()
     expect(pendProg.phase == DOIPLITE_FLASH_DONE, "flash pending done");
     DoipLiteClose(flashPendSession);
     flashPendEntity.stop();
+
+    // Periodic TesterPresent between 0x36 blocks when keep-alive is configured;
+    // never while a 0x78-pending response is outstanding.
+    LoopbackEntity::Options kaOpts;
+    kaOpts.supportedTesterPresent = 0x00;
+    kaOpts.rejectUnknownTesterPresent = true;
+    kaOpts.downloadMaxBlockLength = 0x06; // SID+BSC+4 data
+    kaOpts.downloadLengthFormatId = 0x10;
+    kaOpts.udsPendingCount = 1;
+    kaOpts.udsPendingDelayMs = 150;
+    LoopbackEntity kaEntity(kaOpts);
+    expect(kaEntity.start(), "start flash keep-alive entity");
+    DoipLiteSession *kaSession = DoipLiteOpen(kaEntity.ip(), kaEntity.port());
+    expect(kaSession != nullptr, "open flash keep-alive entity");
+    expect(DoipLiteRoutingActivation(kaSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate flash keep-alive entity");
+    kaEntity.clearReceivedSids();
+    const uint8_t kaPayload[8] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+    DoipLiteFlashJob kaJob{};
+    kaJob.dataFormatId = 0x00;
+    kaJob.addressAndLengthFormatId = 0x44;
+    kaJob.memoryAddress = 0;
+    kaJob.data = kaPayload;
+    kaJob.dataLen = sizeof(kaPayload);
+    kaJob.maxBlockDataCap = 4;
+    kaJob.keepAliveIntervalMs = 40;
+    kaJob.haveKeepAliveSubFunction = 1;
+    kaJob.keepAliveSubFunction = 0x00;
+    kaJob.timeoutMs = 1000;
+    expect(DoipLiteFlashStart(kaSession, &kaJob) == DOIPLITE_OK, "flash keep-alive start");
+    DoipLiteFlashProgress kaProg{};
+    flashSt = DOIPLITE_OK;
+    flashPolls = 0;
+    while (flashPolls < 64)
+    {
+        // Idle gap between polls so keep-alive interval can elapse when not waiting.
+        if (flashPolls > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        flashSt = DoipLiteFlashPoll(kaSession, &kaProg);
+        ++flashPolls;
+        if (kaProg.phase == DOIPLITE_FLASH_DONE || kaProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_OK, "flash keep-alive completes");
+    expect(kaProg.phase == DOIPLITE_FLASH_DONE, "flash keep-alive done");
+    {
+        const auto sids = kaEntity.receivedSids();
+        const auto times = kaEntity.receivedSidTimesMs();
+        expect(count_sid(sids, 0x36) >= 2, "flash keep-alive sent multiple 0x36");
+        expect(count_sid(sids, 0x3E) >= 1, "flash keep-alive sent periodic 0x3E");
+        // Any 0x3E after a 0x36 must arrive only after that block's pending window
+        // (not while 0x78 / final response is still outstanding).
+        for (std::size_t i = 0; i < sids.size(); ++i)
+        {
+            if (sids[i] != 0x36)
+            {
+                continue;
+            }
+            for (std::size_t j = i + 1; j < sids.size(); ++j)
+            {
+                if (sids[j] == 0x3E)
+                {
+                    expect(times[j] >= times[i] + 140,
+                           "keep-alive 0x3E not sent while 0x36 response outstanding");
+                    break;
+                }
+                if (sids[j] == 0x36 || sids[j] == 0x37)
+                {
+                    break;
+                }
+            }
+        }
+    }
+    DoipLiteClose(kaSession);
+    kaEntity.stop();
+
+    // No periodic 0x3E when keep-alive is not provided (interval/sub-function unset).
+    LoopbackEntity::Options noKaOpts;
+    noKaOpts.supportedTesterPresent = 0x00;
+    noKaOpts.rejectUnknownTesterPresent = true;
+    noKaOpts.downloadMaxBlockLength = 0x06;
+    noKaOpts.downloadLengthFormatId = 0x10;
+    LoopbackEntity noKaEntity(noKaOpts);
+    expect(noKaEntity.start(), "start flash no-keep-alive entity");
+    DoipLiteSession *noKaSession = DoipLiteOpen(noKaEntity.ip(), noKaEntity.port());
+    expect(noKaSession != nullptr, "open flash no-keep-alive entity");
+    expect(DoipLiteRoutingActivation(noKaSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate flash no-keep-alive entity");
+    noKaEntity.clearReceivedSids();
+    DoipLiteFlashJob noKaJob{};
+    noKaJob.dataFormatId = 0x00;
+    noKaJob.addressAndLengthFormatId = 0x44;
+    noKaJob.memoryAddress = 0;
+    noKaJob.data = kaPayload;
+    noKaJob.dataLen = sizeof(kaPayload);
+    noKaJob.maxBlockDataCap = 4;
+    noKaJob.timeoutMs = 1000;
+    expect(DoipLiteFlashStart(noKaSession, &noKaJob) == DOIPLITE_OK, "flash no-keep-alive start");
+    DoipLiteFlashProgress noKaProg{};
+    flashSt = DOIPLITE_OK;
+    flashPolls = 0;
+    while (flashPolls < 64)
+    {
+        if (flashPolls > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        flashSt = DoipLiteFlashPoll(noKaSession, &noKaProg);
+        ++flashPolls;
+        if (noKaProg.phase == DOIPLITE_FLASH_DONE || noKaProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_OK, "flash no-keep-alive completes");
+    expect(noKaProg.phase == DOIPLITE_FLASH_DONE, "flash no-keep-alive done");
+    expect(count_sid(noKaEntity.receivedSids(), 0x3E) == 0,
+           "no periodic 0x3E when keep-alive not configured");
+    DoipLiteClose(noKaSession);
+    noKaEntity.stop();
+
+    // Interval alone without sub-function must not invent a default 0x3E.
+    LoopbackEntity::Options halfKaEntityOpts = noKaOpts;
+    LoopbackEntity halfKaEntity(halfKaEntityOpts);
+    expect(halfKaEntity.start(), "start flash interval-only entity");
+    DoipLiteSession *halfKaSession = DoipLiteOpen(halfKaEntity.ip(), halfKaEntity.port());
+    expect(halfKaSession != nullptr, "open flash interval-only entity");
+    expect(DoipLiteRoutingActivation(halfKaSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate flash interval-only entity");
+    halfKaEntity.clearReceivedSids();
+    DoipLiteFlashJob halfKaJob = noKaJob;
+    halfKaJob.keepAliveIntervalMs = 40;
+    halfKaJob.haveKeepAliveSubFunction = 0;
+    expect(DoipLiteFlashStart(halfKaSession, &halfKaJob) == DOIPLITE_OK,
+           "flash interval-only start");
+    flashPolls = 0;
+    while (flashPolls < 64)
+    {
+        if (flashPolls > 0)
+        {
+            std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        }
+        flashSt = DoipLiteFlashPoll(halfKaSession, &noKaProg);
+        ++flashPolls;
+        if (noKaProg.phase == DOIPLITE_FLASH_DONE || noKaProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(count_sid(halfKaEntity.receivedSids(), 0x3E) == 0,
+           "interval without sub-function sends no 0x3E");
+    DoipLiteClose(halfKaSession);
+    halfKaEntity.stop();
+
+    // Progress math uses 64-bit intermediates for packages larger than ~61 MiB.
+    // DoIP diagnostic payload cap is 64 KiB, so transfer many blocks; stop once
+    // cumulative done exceeds UINT32_MAX/70 (where done*70 would overflow uint32).
+    constexpr uint32_t kLargeSize = 62u * 1024u * 1024u;
+    constexpr uint32_t kBlockData = 60u * 1024u; // well under kMaxDiagnosticPayload
+    std::vector<uint8_t> largePayload(kLargeSize, 0x5A);
+    LoopbackEntity::Options largeOpts;
+    largeOpts.downloadMaxBlockLength = 2u + kBlockData;
+    largeOpts.downloadLengthFormatId = 0x20; // 2-byte maxNumberOfBlockLength
+    LoopbackEntity largeEntity(largeOpts);
+    expect(largeEntity.start(), "start large-progress flash entity");
+    DoipLiteSession *largeSession = DoipLiteOpen(largeEntity.ip(), largeEntity.port());
+    expect(largeSession != nullptr, "open large-progress flash entity");
+    expect(DoipLiteRoutingActivation(largeSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate large-progress flash entity");
+    DoipLiteFlashJob largeJob{};
+    largeJob.dataFormatId = 0x00;
+    largeJob.addressAndLengthFormatId = 0x44;
+    largeJob.memoryAddress = 0;
+    largeJob.data = largePayload.data();
+    largeJob.dataLen = kLargeSize;
+    largeJob.maxBlockDataCap = kBlockData;
+    largeJob.timeoutMs = 2000;
+    expect(DoipLiteFlashStart(largeSession, &largeJob) == DOIPLITE_OK, "large flash start");
+    DoipLiteFlashProgress largeProg{};
+    uint32_t overflowPercent = 0;
+    flashSt = DOIPLITE_OK;
+    flashPolls = 0;
+    // Blocks needed for done > UINT32_MAX/70 ≈ 61356675.
+    const uint32_t blocksPastOverflow =
+        (61356675u / kBlockData) + 2u; // a couple past the threshold
+    const uint32_t pollBudget = blocksPastOverflow + 8u;
+    while (flashPolls < static_cast<int>(pollBudget))
+    {
+        flashSt = DoipLiteFlashPoll(largeSession, &largeProg);
+        ++flashPolls;
+        if (flashSt != DOIPLITE_OK)
+        {
+            break;
+        }
+        if (largeProg.phase == DOIPLITE_FLASH_TRANSFER)
+        {
+            // Reconstruct done from percent only after we are past the overflow
+            // threshold: 20 + (done*70)/total >= 20 + (61356676*70)/kLargeSize.
+            const uint32_t minPct = static_cast<uint32_t>(
+                20u + (static_cast<uint64_t>(61356676ull) * 70ull) / kLargeSize);
+            if (largeProg.percent >= minPct && largeProg.percent < 90)
+            {
+                overflowPercent = largeProg.percent;
+                break;
+            }
+        }
+        if (largeProg.phase == DOIPLITE_FLASH_DONE || largeProg.phase == DOIPLITE_FLASH_FAILED)
+        {
+            break;
+        }
+    }
+    expect(flashSt == DOIPLITE_OK, "large flash poll ok through overflow region");
+    expect(overflowPercent != 0, "large flash reached overflow-region progress");
+    // 32-bit overflow of done*70 would collapse percent near ~20 instead of ~86.
+    expect(overflowPercent >= 80 && overflowPercent < 90,
+           "large flash mid progress uses 64-bit math");
+    DoipLiteClose(largeSession);
+    largeEntity.stop();
 
     // A closed TCP port should produce a network error, not hang.
     DoipLiteSession *refused = DoipLiteOpen("127.0.0.1", 1);

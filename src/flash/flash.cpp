@@ -99,6 +99,9 @@ DoipLiteStatus BuildParams(const DoipLiteFlashJob *job, doiplite::flash::FlashJo
 
     params->haveEcuReset = job->haveEcuReset != 0;
     params->resetType = job->resetType;
+    params->keepAliveIntervalMs = job->keepAliveIntervalMs;
+    params->haveKeepAliveSubFunction = job->haveKeepAliveSubFunction != 0;
+    params->keepAliveSubFunction = job->keepAliveSubFunction;
     params->timeoutMs = job->timeoutMs;
 
     const DoipLiteStatus loadSt = LoadPayload(job, &params->payload);

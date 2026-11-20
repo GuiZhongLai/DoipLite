@@ -9,8 +9,9 @@ namespace uds {
 
 /**
  * UDS 0x31 RoutineControl — one focused unit.
- * Talks to the ECU only through DoipLiteSendUds; never builds DoIP headers.
+ * Talks to the ECU only through DoipLiteSendUdsInternal; never builds DoIP headers.
  * Sub-function, routine ID, and option record are caller-supplied.
+ * Supports suppressPosRspMsgIndicationBit via SendUdsInternal.
  */
 class RoutineControl final
 {

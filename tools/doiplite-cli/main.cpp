@@ -71,6 +71,10 @@ struct Options
     std::string packagePath;
     uint8_t flashResetType = 0;
     bool haveFlashResetType = false;
+    uint32_t flashKeepAliveIntervalMs = 0;
+    bool haveFlashKeepAliveInterval = false;
+    uint8_t flashKeepAliveSubFunction = 0;
+    bool haveFlashKeepAliveSubFunction = false;
 
     bool havePort = false;
     bool haveTesterAddr = false;
@@ -124,12 +128,17 @@ void printHelp()
         "  --flash-max-block-data-cap / flash_max_block_data_cap\n"
         "  --package-path / package_path\n"
         "  --flash-reset-type / flash_reset_type\n"
+        "  --flash-keep-alive-interval-ms / flash_keep_alive_interval_ms\n"
+        "  --flash-keep-alive-sub-function / flash_keep_alive_sub_function\n"
         "\n"
         "All field-specific values come from flags/config; the library never invents\n"
         "plant IPs, routine IDs, memory addresses, reset types, or programming session.\n"
         "flash runs the orchestrated sequence (optional session/erase/reset; required\n"
         "download+transfer+exit from package_path or transfer data). 0x27 security is\n"
-        "not implemented. Periodic TesterPresent during long transfer is a follow-up.\n"
+        "not implemented. Periodic TesterPresent (0x3E) during long transfer requires\n"
+        "both flash_keep_alive_interval_ms (>0) and flash_keep_alive_sub_function;\n"
+        "the library invents neither default. 0x31 / 0x10 / 0x11 / 0x3E honor suppress\n"
+        "bit7 (silence = success; 0x78 then silence = timeout).\n"
         "If --tester-addr is omitted, activate and diagnostic commands use 0x0E00 as an\n"
         "ISO external-test-equipment example default (not a field address).\n",
         stdout);
@@ -534,6 +543,26 @@ bool applyKey(Options *opt, const std::string &key, const std::string &value, st
         opt->haveFlashResetType = true;
         return true;
     }
+    if (key == "flash_keep_alive_interval_ms")
+    {
+        if (value.empty() || !parseU32(value, &opt->flashKeepAliveIntervalMs))
+        {
+            *err = "invalid flash_keep_alive_interval_ms";
+            return false;
+        }
+        opt->haveFlashKeepAliveInterval = true;
+        return true;
+    }
+    if (key == "flash_keep_alive_sub_function")
+    {
+        if (value.empty() || !parseU8(value, &opt->flashKeepAliveSubFunction))
+        {
+            *err = "invalid flash_keep_alive_sub_function";
+            return false;
+        }
+        opt->haveFlashKeepAliveSubFunction = true;
+        return true;
+    }
     // Unknown keys (e.g. entity_address) are ignored.
     return true;
 }
@@ -712,6 +741,16 @@ void mergeFlags(Options *opt, const Options &flags)
     {
         opt->flashResetType = flags.flashResetType;
         opt->haveFlashResetType = true;
+    }
+    if (flags.haveFlashKeepAliveInterval)
+    {
+        opt->flashKeepAliveIntervalMs = flags.flashKeepAliveIntervalMs;
+        opt->haveFlashKeepAliveInterval = true;
+    }
+    if (flags.haveFlashKeepAliveSubFunction)
+    {
+        opt->flashKeepAliveSubFunction = flags.flashKeepAliveSubFunction;
+        opt->haveFlashKeepAliveSubFunction = true;
     }
 }
 
@@ -1538,6 +1577,10 @@ int cmdFlash(const Options &opt)
     job.transferExitParamLen = static_cast<uint32_t>(opt.transferExitParam.size());
     job.haveEcuReset = opt.haveFlashResetType ? 1 : 0;
     job.resetType = opt.flashResetType;
+    job.keepAliveIntervalMs =
+        opt.haveFlashKeepAliveInterval ? opt.flashKeepAliveIntervalMs : 0;
+    job.haveKeepAliveSubFunction = opt.haveFlashKeepAliveSubFunction ? 1 : 0;
+    job.keepAliveSubFunction = opt.flashKeepAliveSubFunction;
     job.timeoutMs = opt.timeoutMs;
 
     DoipLiteStatus st = DoipLiteFlashStart(session, &job);
@@ -1922,6 +1965,30 @@ int main(int argc, char **argv)
                 return 2;
             }
             flags.haveFlashResetType = true;
+        }
+        else if (std::strcmp(arg, "--flash-keep-alive-interval-ms") == 0)
+        {
+            const char *v =
+                requireValue(argc, argv, &i, "--flash-keep-alive-interval-ms");
+            if (!v || !parseU32(v, &flags.flashKeepAliveIntervalMs))
+            {
+                std::fputs(
+                    "doiplite-cli: invalid --flash-keep-alive-interval-ms\n", stderr);
+                return 2;
+            }
+            flags.haveFlashKeepAliveInterval = true;
+        }
+        else if (std::strcmp(arg, "--flash-keep-alive-sub-function") == 0)
+        {
+            const char *v =
+                requireValue(argc, argv, &i, "--flash-keep-alive-sub-function");
+            if (!v || !parseU8(v, &flags.flashKeepAliveSubFunction))
+            {
+                std::fputs(
+                    "doiplite-cli: invalid --flash-keep-alive-sub-function\n", stderr);
+                return 2;
+            }
+            flags.haveFlashKeepAliveSubFunction = true;
         }
         else if (std::strcmp(arg, "--help") == 0 || std::strcmp(arg, "-h") == 0)
         {

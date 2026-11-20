@@ -13,6 +13,57 @@ FlashOrchestrator::FlashOrchestrator(DoipLiteSession *session, FlashJobParams pa
 {
 }
 
+bool FlashOrchestrator::keepAliveEnabled() const
+{
+    return params_.haveKeepAliveSubFunction && params_.keepAliveIntervalMs > 0;
+}
+
+void FlashOrchestrator::markActivity()
+{
+    lastActivity_ = std::chrono::steady_clock::now();
+    haveActivityStamp_ = true;
+}
+
+DoipLiteStatus FlashOrchestrator::maybeKeepAlive()
+{
+    if (!keepAliveEnabled())
+    {
+        return DOIPLITE_OK;
+    }
+    if (!haveActivityStamp_)
+    {
+        // First poll: establish the idle clock without sending 0x3E yet.
+        markActivity();
+        return DOIPLITE_OK;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        now - lastActivity_);
+    if (elapsed.count() < static_cast<std::chrono::milliseconds::rep>(
+            params_.keepAliveIntervalMs))
+    {
+        return DOIPLITE_OK;
+    }
+
+    // Idle between completed steps / blocks only — never mid-response.
+    uint8_t resp[16];
+    uint32_t len = 0;
+    const DoipLiteStatus st = UdsTesterPresent(
+        session_,
+        params_.keepAliveSubFunction,
+        resp,
+        sizeof(resp),
+        &len,
+        params_.timeoutMs);
+    markActivity();
+    if (st != DOIPLITE_OK)
+    {
+        fail(st);
+    }
+    return st;
+}
+
 void FlashOrchestrator::fillProgress(DoipLiteFlashProgress *progress) const
 {
     if (!progress)
@@ -36,6 +87,19 @@ void FlashOrchestrator::advanceAfterOptional(DoipLiteFlashPhase next)
     phase_ = next;
 }
 
+void FlashOrchestrator::updateTransferPercent()
+{
+    if (params_.payload.empty())
+    {
+        return;
+    }
+    const uint64_t done = payloadOffset_;
+    const uint64_t total = static_cast<uint64_t>(params_.payload.size());
+    // Map transfer progress into 20%..90% with 64-bit intermediates so packages
+    // larger than ~61 MiB (UINT32_MAX / 70) do not overflow.
+    percent_ = static_cast<uint32_t>(20u + (done * 70u) / total);
+}
+
 DoipLiteStatus FlashOrchestrator::stepSession()
 {
     if (!params_.haveFlashSessionType)
@@ -52,6 +116,7 @@ DoipLiteStatus FlashOrchestrator::stepSession()
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -94,6 +159,7 @@ DoipLiteStatus FlashOrchestrator::stepErase()
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -120,6 +186,7 @@ DoipLiteStatus FlashOrchestrator::stepRequestDownload()
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -159,20 +226,22 @@ DoipLiteStatus FlashOrchestrator::stepTransfer()
         return DOIPLITE_ERR_INVALID_ARG;
     }
 
-    const uint32_t remaining =
-        static_cast<uint32_t>(params_.payload.size() - payloadOffset_);
-    const uint32_t chunk = std::min(remaining, blockDataCap_);
+    const uint64_t remaining =
+        static_cast<uint64_t>(params_.payload.size()) - payloadOffset_;
+    const uint32_t chunk = static_cast<uint32_t>(
+        std::min(remaining, static_cast<uint64_t>(blockDataCap_)));
     uint8_t resp[64];
     uint32_t len = 0;
     const DoipLiteStatus st = UdsTransferData(
         session_,
         blockSequenceCounter_,
-        params_.payload.data() + payloadOffset_,
+        params_.payload.data() + static_cast<std::size_t>(payloadOffset_),
         chunk,
         resp,
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -181,14 +250,7 @@ DoipLiteStatus FlashOrchestrator::stepTransfer()
 
     payloadOffset_ += chunk;
     blockSequenceCounter_ = static_cast<uint8_t>(blockSequenceCounter_ + 1u);
-
-    if (!params_.payload.empty())
-    {
-        const uint32_t done = payloadOffset_;
-        const uint32_t total = static_cast<uint32_t>(params_.payload.size());
-        // Map transfer progress into 20%..90%.
-        percent_ = 20u + (done * 70u) / total;
-    }
+    updateTransferPercent();
 
     if (payloadOffset_ >= params_.payload.size())
     {
@@ -210,6 +272,7 @@ DoipLiteStatus FlashOrchestrator::stepTransferExit()
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -238,6 +301,7 @@ DoipLiteStatus FlashOrchestrator::stepReset()
         sizeof(resp),
         &len,
         params_.timeoutMs);
+    markActivity();
     if (st != DOIPLITE_OK)
     {
         fail(st);
@@ -259,6 +323,15 @@ DoipLiteStatus FlashOrchestrator::poll(DoipLiteFlashProgress *progress)
     if (phase_ == DOIPLITE_FLASH_IDLE)
     {
         phase_ = DOIPLITE_FLASH_SESSION;
+    }
+
+    // Keep-alive only when idle between steps — before starting the next UDS
+    // exchange, never while a previous request (including 0x78) is outstanding.
+    const DoipLiteStatus keepSt = maybeKeepAlive();
+    if (keepSt != DOIPLITE_OK)
+    {
+        fillProgress(progress);
+        return keepSt;
     }
 
     DoipLiteStatus st = DOIPLITE_OK;

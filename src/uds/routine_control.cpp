@@ -1,6 +1,7 @@
 #include "routine_control.h"
 
 #include "doiplite/uds.h"
+#include "doip/send_uds_internal.h"
 #include "uds_result.h"
 
 #include <vector>
@@ -33,6 +34,9 @@ DoipLiteStatus RoutineControl::execute(
         return DOIPLITE_ERR_INVALID_ARG;
     }
 
+    // ISO 14229: bit7 of the sub-function is suppressPosRspMsgIndicationBit.
+    const bool suppressPositive = (args.subFunction & 0x80u) != 0;
+
     // Request data after SID: subFunction | routineId(2) | optionRecord
     std::vector<uint8_t> req;
     req.reserve(3u + args.optionLen);
@@ -47,7 +51,7 @@ DoipLiteStatus RoutineControl::execute(
     uint32_t respCap = cap < 64u ? 64u : cap;
     std::vector<uint8_t> resp(respCap);
     uint32_t respLen = 0;
-    const DoipLiteStatus st = DoipLiteSendUds(
+    const DoipLiteStatus st = DoipLiteSendUdsInternal(
         session,
         0x31,
         req.data(),
@@ -55,7 +59,8 @@ DoipLiteStatus RoutineControl::execute(
         resp.data(),
         respCap,
         &respLen,
-        timeoutMs);
+        timeoutMs,
+        suppressPositive);
 
     if (st != DOIPLITE_OK)
     {
@@ -63,14 +68,24 @@ DoipLiteStatus RoutineControl::execute(
         return st;
     }
 
+    if (suppressPositive && respLen == 0)
+    {
+        if (len)
+        {
+            *len = 0;
+        }
+        return DOIPLITE_OK;
+    }
+
     // Positive: 0x71 | subFunction | routineId | optional status record
-    if (respLen < 3 || resp[0] != 0x71 || resp[1] != args.subFunction)
+    if (respLen < 4 || resp[0] != 0x71 ||
+        (resp[1] & 0x7F) != (args.subFunction & 0x7F))
     {
         return DOIPLITE_ERR_NETWORK;
     }
     const uint16_t gotId = static_cast<uint16_t>(
         (static_cast<uint16_t>(resp[2]) << 8) | resp[3]);
-    if (respLen < 4 || gotId != args.routineId)
+    if (gotId != args.routineId)
     {
         return DOIPLITE_ERR_NETWORK;
     }
