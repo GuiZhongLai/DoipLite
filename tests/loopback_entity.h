@@ -1,8 +1,10 @@
 #pragma once
 
 #include <array>
+#include <chrono>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -55,6 +57,8 @@ public:
         bool rejectUnknownTesterPresent = false;
         // Fake 0x31 RoutineControl (placeholder IDs only — not plant / OEM).
         // When rejectUnknownRoutine is set, only supportedRoutineId is accepted.
+        // suppressPositiveResponse (bit7) yields silence on an accepted routine;
+        // NRC is always returned when rejected.
         uint16_t supportedRoutineId = 0xFF00;
         bool rejectUnknownRoutine = false;
         // Fake 0x34 RequestDownload: positive 0x74 carries this max block length
@@ -97,8 +101,23 @@ public:
     uint16_t port() const { return port_; }
     const char *ip() const { return "127.0.0.1"; }
 
+    /** Clear recorded diagnostic request SIDs (test helper). */
+    void clearReceivedSids();
+    /** Copy of SIDs from diagnostic requests received so far (test helper). */
+    std::vector<uint8_t> receivedSids() const;
+    /**
+     * Steady-clock milliseconds since entity start for each recorded SID
+     * (same order as receivedSids). Empty if start() has not been called.
+     */
+    std::vector<uint64_t> receivedSidTimesMs() const;
+
 private:
     struct Client;
+    struct DiagRecord
+    {
+        uint8_t sid = 0;
+        std::chrono::steady_clock::time_point at{};
+    };
 
     void arm_udp();
     void arm_accept();
@@ -125,4 +144,8 @@ private:
     uint16_t port_ = 0;
     bool running_ = false;
     uint32_t routingRequests_ = 0;
+
+    mutable std::mutex diagLogMutex_;
+    std::vector<DiagRecord> diagLog_;
+    std::chrono::steady_clock::time_point startedAt_{};
 };

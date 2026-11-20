@@ -79,11 +79,49 @@ LoopbackEntity::~LoopbackEntity()
     stop();
 }
 
+void LoopbackEntity::clearReceivedSids()
+{
+    std::lock_guard<std::mutex> lock(diagLogMutex_);
+    diagLog_.clear();
+}
+
+std::vector<uint8_t> LoopbackEntity::receivedSids() const
+{
+    std::lock_guard<std::mutex> lock(diagLogMutex_);
+    std::vector<uint8_t> out;
+    out.reserve(diagLog_.size());
+    for (const auto &rec : diagLog_)
+    {
+        out.push_back(rec.sid);
+    }
+    return out;
+}
+
+std::vector<uint64_t> LoopbackEntity::receivedSidTimesMs() const
+{
+    std::lock_guard<std::mutex> lock(diagLogMutex_);
+    std::vector<uint64_t> out;
+    out.reserve(diagLog_.size());
+    for (const auto &rec : diagLog_)
+    {
+        out.push_back(static_cast<uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(rec.at - startedAt_)
+                .count()));
+    }
+    return out;
+}
+
 bool LoopbackEntity::start()
 {
     if (running_)
     {
         return true;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(diagLogMutex_);
+        diagLog_.clear();
+        startedAt_ = std::chrono::steady_clock::now();
     }
 
     asio::error_code ec;
@@ -223,7 +261,11 @@ void LoopbackEntity::arm_accept()
                             return;
                         }
                         const uint32_t len = ReadU32Be(&self->header[4]);
-                        if (len > 4096)
+                        // Control frames stay small; diagnostic 0x8001 may carry a
+                        // full TransferData block up to the library payload cap.
+                        const uint16_t ptype = ReadU16Be(&self->header[2]);
+                        const uint32_t maxLen = ptype == 0x8001 ? 65535u : 4096u;
+                        if (len > maxLen)
                         {
                             return;
                         }
@@ -419,6 +461,14 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
         return;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(diagLogMutex_);
+        DiagRecord rec;
+        rec.sid = uds[0];
+        rec.at = std::chrono::steady_clock::now();
+        diagLog_.push_back(rec);
+    }
+
     for (uint32_t i = 0; i < options_.udsPendingCount; ++i)
     {
         const std::vector<uint8_t> pending{0x7F, uds[0], 0x78};
@@ -533,15 +583,19 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
         }
         else
         {
+            const uint8_t requested = uds[1];
+            const bool suppress = (requested & 0x80u) != 0;
             const uint16_t rid = ReadU16Be(uds + 2);
             if (rid != options_.supportedRoutineId)
             {
+                // NRC is always returned, even when suppressPositiveResponse is set.
                 udsResp = {0x7F, 0x31, 0x31};
             }
-            else
+            else if (!suppress)
             {
-                udsResp = {0x71, uds[1], uds[2], uds[3]};
+                udsResp = {0x71, static_cast<uint8_t>(requested & 0x7F), uds[2], uds[3]};
             }
+            // suppress + accepted routine: intentional silence (no positive response).
         }
     }
     else if (uds[0] == 0x34)
@@ -567,6 +621,22 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
             udsResp.insert(udsResp.end(), be + (4 - use), be + 4);
         }
     }
+    else if (uds[0] == 0x36)
+    {
+        // Positive 0x76 + blockSequenceCounter only (do not echo block data).
+        if (udsLen < 2)
+        {
+            udsResp = {0x7F, 0x36, 0x13};
+        }
+        else
+        {
+            udsResp = {0x76, uds[1]};
+        }
+    }
+    else if (uds[0] == 0x37)
+    {
+        udsResp = {0x77};
+    }
     else if (uds[0] == 0x11 && options_.rejectUnknownReset)
     {
         if (udsLen < 2)
@@ -591,9 +661,9 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
 
     if (udsResp.empty())
     {
-        // Default 0x10 / 0x3E / 0x11 echo also honors suppressPositiveResponse bit7.
-        if ((uds[0] == 0x10 || uds[0] == 0x3E || uds[0] == 0x11) && udsLen >= 2 &&
-            (uds[1] & 0x80u) != 0)
+        // Default 0x10 / 0x3E / 0x11 / 0x31 echo also honors suppressPositiveResponse bit7.
+        if ((uds[0] == 0x10 || uds[0] == 0x3E || uds[0] == 0x11 || uds[0] == 0x31) &&
+            udsLen >= 2 && (uds[1] & 0x80u) != 0)
         {
             return;
         }

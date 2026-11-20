@@ -39,6 +39,12 @@ struct FlashJobParams
     bool haveEcuReset = false;
     uint8_t resetType = 0;
 
+    // Periodic 0x3E keep-alive: both interval > 0 and haveKeepAliveSubFunction
+    // required; library invents neither default.
+    uint32_t keepAliveIntervalMs = 0;
+    bool haveKeepAliveSubFunction = false;
+    uint8_t keepAliveSubFunction = 0;
+
     uint32_t timeoutMs = 0;
 };
 

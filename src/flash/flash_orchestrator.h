@@ -4,6 +4,8 @@
 
 #include "doiplite/flash.h"
 
+#include <chrono>
+
 namespace doiplite {
 namespace flash {
 
@@ -15,6 +17,10 @@ namespace flash {
  *   SESSION(0x10?) -> SECURITY(skip/fail) -> ERASE(0x31?) ->
  *   REQUEST_DOWNLOAD(0x34) -> TRANSFER(0x36 x N) ->
  *   TRANSFER_EXIT(0x37) -> RESET(0x11?) -> DONE
+ *
+ * Optional periodic TesterPresent (0x3E) is issued only between completed
+ * steps / 0x36 blocks when keep-alive is configured — never while a UDS
+ * request (including 0x78 pending) is outstanding.
  */
 class FlashOrchestrator final
 {
@@ -39,9 +45,14 @@ private:
     DoipLiteStatus stepTransferExit();
     DoipLiteStatus stepReset();
 
+    DoipLiteStatus maybeKeepAlive();
+    void markActivity();
+    bool keepAliveEnabled() const;
+
     void fail(DoipLiteStatus err);
     void fillProgress(DoipLiteFlashProgress *progress) const;
     void advanceAfterOptional(DoipLiteFlashPhase next);
+    void updateTransferPercent();
 
     DoipLiteSession *session_; // non-owning; lifetime owned by C API session
     FlashJobParams params_;
@@ -51,8 +62,11 @@ private:
 
     uint32_t maxBlockLength_ = 0; // from 0x74, includes SID + counter
     uint32_t blockDataCap_ = 0;   // bytes of payload per 0x36
-    uint32_t payloadOffset_ = 0;
+    uint64_t payloadOffset_ = 0;
     uint8_t blockSequenceCounter_ = 1; // ISO: first TransferData uses 0x01
+
+    bool haveActivityStamp_ = false;
+    std::chrono::steady_clock::time_point lastActivity_{};
 };
 
 } // namespace flash

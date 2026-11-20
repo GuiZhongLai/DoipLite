@@ -78,6 +78,17 @@ typedef struct DoipLiteFlashJob {
     int haveEcuReset;
     uint8_t resetType;
 
+    /**
+     * 可选：长传过程中的周期性 TesterPresent（0x3E）保活。
+     * 仅在 flash 步骤之间或 0x36 块之间、会话可能空闲时发送；
+     * 不会在等待 UDS 应答（含 NRC 0x78）期间插入。
+     * 库不提供默认间隔或默认子功能：keepAliveIntervalMs 为 0，或
+     * haveKeepAliveSubFunction 未置位时，不发送周期性 0x3E。
+     */
+    uint32_t keepAliveIntervalMs;
+    int haveKeepAliveSubFunction;
+    uint8_t keepAliveSubFunction;
+
     /** 每步首应答窗口；0 表示使用会话当前 P2。 */
     uint32_t timeoutMs;
 } DoipLiteFlashJob;

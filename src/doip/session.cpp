@@ -40,7 +40,8 @@ DoipLiteSession::DoipLiteSession() = default;
 DoipLiteSession::~DoipLiteSession() = default;
 
 // 字节流已无法与对端对齐（超时、半帧、断连，或帧头/长度无法解析）。
-// 关闭 TCP 并清除激活，避免同一会话的下一次读复用残留或迟到的字节。
+// 关闭 TCP 并清除激活与 EntityAddress，避免同一会话的下一次读复用残留或
+// 迟到的字节，也避免重连后仍读到陈旧实体地址。
 static void MarkTransportBroken(DoipLiteSession *session)
 {
     if (!session)
@@ -49,6 +50,7 @@ static void MarkTransportBroken(DoipLiteSession *session)
     }
     session->tcp.close();
     session->routingActivated = false;
+    session->entityAddress = 0;
 }
 
 static bool IsTransportFailure(DoipLiteStatus status)
