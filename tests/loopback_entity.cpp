@@ -122,6 +122,7 @@ bool LoopbackEntity::start()
         return false;
     }
 
+    routingRequests_ = 0;
     arm_udp();
     arm_accept();
 
@@ -270,18 +271,83 @@ void LoopbackEntity::handle_routing(const std::shared_ptr<Client> &client,
                                     const uint8_t *payload,
                                     uint32_t payloadLen)
 {
-    if (!options_.replyRouting || !payload || payloadLen < 7)
+    if (!payload || payloadLen < 7)
     {
         return;
     }
+
+    const bool first = routingRequests_ == 0;
+    ++routingRequests_;
+
+    if (first && options_.routingCloseFirst)
+    {
+        asio::error_code ignored;
+        client->sock.shutdown(asio::ip::tcp::socket::shutdown_both, ignored);
+        client->sock.close(ignored);
+        return;
+    }
+    if (!options_.replyRouting)
+    {
+        return;
+    }
+
     const uint16_t tester = ReadU16Be(payload);
+    uint8_t code = options_.routingCode;
+    if (first && options_.routingDelayMs > 0 && options_.routingLateNack)
+    {
+        code = options_.routingLateCode;
+    }
     uint8_t body[9] = {0};
     WriteU16Be(&body[0], tester);
     WriteU16Be(&body[2], options_.logicalAddress);
-    body[4] = options_.routingCode;
-    const auto frame = Encode(0x0006, body, 9);
-    asio::error_code ignored;
-    asio::write(client->sock, asio::buffer(frame), ignored);
+    body[4] = code;
+    const auto frame = std::make_shared<std::vector<uint8_t>>(Encode(0x0006, body, 9));
+
+    auto write_at = [client, frame](std::size_t offset, std::size_t count) {
+        if (!client->sock.is_open() || offset >= frame->size() || count == 0)
+        {
+            return;
+        }
+        const std::size_t avail = frame->size() - offset;
+        const std::size_t n = count < avail ? count : avail;
+        asio::error_code ignored;
+        asio::write(client->sock, asio::buffer(frame->data() + offset, n), ignored);
+    };
+
+    // Header immediately, payload later: the client can time out between
+    // the two writes and observe a partial activation response.
+    if (first && options_.routingPayloadDelayMs > 0)
+    {
+        asio::error_code ignored;
+        client->sock.set_option(asio::ip::tcp::no_delay(true), ignored);
+        write_at(0, 8);
+        auto timer = std::make_shared<asio::steady_timer>(io_);
+        timer->expires_after(std::chrono::milliseconds(options_.routingPayloadDelayMs));
+        timer->async_wait([write_at, frame, timer](const asio::error_code &ec) {
+            if (ec)
+            {
+                return;
+            }
+            write_at(8, frame->size());
+        });
+        return;
+    }
+
+    if (!first || options_.routingDelayMs == 0)
+    {
+        write_at(0, frame->size());
+        return;
+    }
+
+    auto timer = std::make_shared<asio::steady_timer>(io_);
+    timer->expires_after(std::chrono::milliseconds(options_.routingDelayMs));
+    timer->async_wait([write_at, frame, timer](const asio::error_code &ec) {
+        if (ec)
+        {
+            return;
+        }
+        write_at(0, frame->size());
+    });
 }
 
 void LoopbackEntity::send_diagnostic_uds(const std::shared_ptr<Client> &client,

@@ -57,6 +57,11 @@ DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivation(
  * 与 DoipLiteRoutingActivation 相同，但可指定超时。
  * timeoutMs 为 0 时使用 DOIPLITE_DEFAULT_TIMEOUT_MS。
  * activationType 按协议取低 8 位。
+ *
+ * 超时或网络失败（含半帧、断连，以及无法解析的帧）会关闭 TCP，并清除
+ * 本会话的激活状态。同一会话再次调用会重新连接，不会把上一次迟到或
+ * 残留的应答当成新的结果。完整的路由激活否定或通用 NACK 仍返回
+ * DOIPLITE_ERR_DOIP_NACK，响应码保留在 DoipLiteLastDoipCode，连接保持打开。
  */
 DOIPLITE_API DoipLiteStatus DoipLiteRoutingActivationEx(
     DoipLiteSession *session,
