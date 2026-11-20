@@ -62,6 +62,86 @@ DOIPLITE_API DoipLiteStatus UdsTesterPresent(
     uint32_t *len,
     uint32_t timeoutMs);
 
+/**
+ * 通过 DoipLiteSendUds 发送 UDS 0x31 RoutineControl。
+ * 子功能、routine ID、可选 routineControlOptionRecord 均只来自调用参数。
+ * 成功时 out 写入完整肯定应答（0x71 + 子功能 + routineId + 可选 status record）。
+ * 收到 UDS 否定应答时返回 DOIPLITE_ERR_UDS_NRC，out 写入完整 0x7F 应答。
+ */
+DOIPLITE_API DoipLiteStatus UdsRoutineControl(
+    DoipLiteSession *session,
+    uint8_t subFunction,
+    uint16_t routineId,
+    const uint8_t *optionRecord,
+    uint32_t optionLen,
+    uint8_t *out,
+    uint32_t cap,
+    uint32_t *len,
+    uint32_t timeoutMs);
+
+/**
+ * 通过 DoipLiteSendUds 发送 UDS 0x34 RequestDownload。
+ * dataFormatId、ALFID、memoryAddress、memorySize 均只来自调用参数。
+ * ALFID：高半字节为 memorySize 字节数，低半字节为 memoryAddress 字节数（1..8）。
+ * 成功时解析 0x74，写出 lengthFormatIdentifier / maxNumberOfBlockLength 到
+ * *outMaxBlockLength（可为 NULL）；out 写入完整肯定应答。
+ * ISO：maxNumberOfBlockLength 含 SID 与 blockSequenceCounter（即 0x36 整帧上限）。
+ */
+DOIPLITE_API DoipLiteStatus UdsRequestDownload(
+    DoipLiteSession *session,
+    uint8_t dataFormatId,
+    uint8_t addressAndLengthFormatId,
+    uint64_t memoryAddress,
+    uint64_t memorySize,
+    uint32_t *outMaxBlockLength,
+    uint8_t *out,
+    uint32_t cap,
+    uint32_t *len,
+    uint32_t timeoutMs);
+
+/**
+ * 通过 DoipLiteSendUds 发送 UDS 0x36 TransferData。
+ * blockSequenceCounter 与原始块数据只来自调用参数；不解析 OEM 包格式。
+ * 成功时 out 写入完整肯定应答（0x76 + blockSequenceCounter + 可选记录）。
+ */
+DOIPLITE_API DoipLiteStatus UdsTransferData(
+    DoipLiteSession *session,
+    uint8_t blockSequenceCounter,
+    const uint8_t *data,
+    uint32_t dataLen,
+    uint8_t *out,
+    uint32_t cap,
+    uint32_t *len,
+    uint32_t timeoutMs);
+
+/**
+ * 通过 DoipLiteSendUds 发送 UDS 0x37 RequestTransferExit。
+ * 可选 transferRequestParameterRecord 为调用方原始字节。
+ * 成功时 out 写入完整肯定应答（0x77 + 可选记录）。
+ */
+DOIPLITE_API DoipLiteStatus UdsRequestTransferExit(
+    DoipLiteSession *session,
+    const uint8_t *parameterRecord,
+    uint32_t parameterLen,
+    uint8_t *out,
+    uint32_t cap,
+    uint32_t *len,
+    uint32_t timeoutMs);
+
+/**
+ * 通过 DoipLiteSendUds 发送 UDS 0x11 ECUReset。
+ * resetType 只来自调用参数，库不提供现场默认复位类型。
+ * 成功时 out 写入完整肯定应答（0x51 + resetType）。
+ * 子功能 bit7（suppressPosRspMsgIndicationBit）语义同 DiagnosticSessionControl。
+ */
+DOIPLITE_API DoipLiteStatus UdsEcuReset(
+    DoipLiteSession *session,
+    uint8_t resetType,
+    uint8_t *out,
+    uint32_t cap,
+    uint32_t *len,
+    uint32_t timeoutMs);
+
 DOIPLITE_EXTERN_C_END
 
 #endif

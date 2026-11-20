@@ -1,7 +1,9 @@
 #include "doiplite/doip.h"
 
+#include "flash/flash_orchestrator.h"
 #include "protocol.h"
 #include "send_uds_internal.h"
+#include "session_internal.h"
 #include "net/net_internal.h"
 
 #include <chrono>
@@ -34,17 +36,8 @@ bool SameVehicle(const DoipLiteVehicle &a, const DoipLiteVehicle &b)
 
 } // namespace
 
-struct DoipLiteSession {
-    std::string ip;
-    uint16_t port = DOIPLITE_DEFAULT_TCP_PORT;
-    uint8_t lastDoipCode = 0;
-    uint16_t entityAddress = 0;
-    uint16_t testerAddress = 0;
-    bool routingActivated = false;
-    uint32_t p2Ms = DOIPLITE_DEFAULT_P2_MS;
-    uint32_t p2StarMs = DOIPLITE_DEFAULT_P2_STAR_MS;
-    doiplite::net::TcpChannel tcp;
-};
+DoipLiteSession::DoipLiteSession() = default;
+DoipLiteSession::~DoipLiteSession() = default;
 
 // 字节流已无法与对端对齐（超时、半帧、断连，或帧头/长度无法解析）。
 // 关闭 TCP 并清除激活，避免同一会话的下一次读复用残留或迟到的字节。
