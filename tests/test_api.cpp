@@ -389,6 +389,70 @@ int main()
     DoipLiteClose(pendingDidSession);
     pendingDidEntity.stop();
 
+    expect(UdsDiagnosticSessionControl(nullptr, 0x01, nullptr, 0, nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "session control null session");
+    uint8_t sessBuf[16];
+
+    DoipLiteSession *notActivatedSession = DoipLiteOpen(entity.ip(), entity.port());
+    expect(notActivatedSession != nullptr, "open for session without activate");
+    expect(UdsDiagnosticSessionControl(
+               notActivatedSession, 0x01, sessBuf, sizeof(sessBuf), nullptr, 100) ==
+               DOIPLITE_ERR_NETWORK,
+           "session control without routing activation is network");
+    DoipLiteClose(notActivatedSession);
+
+    LoopbackEntity::Options sessOpts;
+    sessOpts.supportedSession = 0x01; // ISO defaultSession example, not a plant value
+    sessOpts.rejectUnknownSession = true;
+    sessOpts.sessionIncludeTiming = true;
+    sessOpts.sessionP2 = 0x0032;
+    sessOpts.sessionP2Star = 0x01F4;
+    LoopbackEntity sessEntity(sessOpts);
+    expect(sessEntity.start(), "start session-control entity");
+    DoipLiteSession *sessSession = DoipLiteOpen(sessEntity.ip(), sessEntity.port());
+    expect(sessSession != nullptr, "open session-control entity");
+    expect(UdsDiagnosticSessionControl(sessSession, 0x01, nullptr, sizeof(sessBuf), nullptr, 100) ==
+               DOIPLITE_ERR_INVALID_ARG,
+           "session control cap without buffer");
+    expect(DoipLiteRoutingActivation(sessSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate session-control entity");
+    uint32_t sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               sessSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session control success");
+    expect(sessLen == 6, "session positive response includes P2/P2*");
+    expect(sessBuf[0] == 0x50 && sessBuf[1] == 0x01, "positive 0x50 + subfunction");
+    expect(sessBuf[2] == 0x00 && sessBuf[3] == 0x32, "P2 50 ms");
+    expect(sessBuf[4] == 0x01 && sessBuf[5] == 0xF4, "P2* 0x01F4");
+
+    uint8_t sessNrc[16];
+    uint32_t sessNrcLen = 0;
+    expect(UdsDiagnosticSessionControl(
+               sessSession, 0x03, sessNrc, sizeof(sessNrc), &sessNrcLen, 1000) ==
+               DOIPLITE_ERR_UDS_NRC,
+           "unsupported session type is uds nrc");
+    expect(sessNrcLen == 3, "session nrc length");
+    expect(sessNrc[0] == 0x7F && sessNrc[1] == 0x10 && sessNrc[2] == 0x12,
+           "session nrc 0x12");
+    DoipLiteClose(sessSession);
+    sessEntity.stop();
+
+    // Default loopback echoes 0x10 as 0x50 + subfunction, without timing bytes.
+    DoipLiteSession *echoSession = DoipLiteOpen(entity.ip(), entity.port());
+    expect(echoSession != nullptr, "open default entity for session echo");
+    expect(DoipLiteRoutingActivation(echoSession, 0x0E00, 0x00, nullptr, 0) == DOIPLITE_OK,
+           "activate default entity for session echo");
+    sessLen = 0;
+    std::memset(sessBuf, 0, sizeof(sessBuf));
+    expect(UdsDiagnosticSessionControl(
+               echoSession, 0x01, sessBuf, sizeof(sessBuf), &sessLen, 1000) == DOIPLITE_OK,
+           "session control echo on default entity");
+    expect(sessLen == 2 && sessBuf[0] == 0x50 && sessBuf[1] == 0x01,
+           "default entity 0x10 echo is 0x50 + type");
+    DoipLiteClose(echoSession);
+
     LoopbackEntity::Options pendingTimeoutOpts;
     pendingTimeoutOpts.udsPendingCount = 1;
     pendingTimeoutOpts.udsDropAfterPending = true;
@@ -507,6 +571,48 @@ int main()
     expect(output.find("uds_nrc") != std::string::npos, "cli mentions uds_nrc");
     expect(output.find("0x31") != std::string::npos, "cli surfaces nrc 0x31");
     cliDid.stop();
+
+    int missingSessCode = 99;
+    std::string missingSessOut;
+    expect(run_cli("session --ip 127.0.0.1 --port 13400", &missingSessCode, &missingSessOut),
+           "run cli session without type");
+    expect(missingSessCode != 0, "cli session without type is non-zero");
+    expect(missingSessOut.find("session") != std::string::npos ||
+               missingSessOut.find("session_type") != std::string::npos,
+           "cli mentions missing session type");
+
+    LoopbackEntity::Options cliSessOpts;
+    cliSessOpts.supportedSession = 0x01;
+    cliSessOpts.rejectUnknownSession = true;
+    cliSessOpts.sessionIncludeTiming = true;
+    cliSessOpts.sessionP2 = 0x0032;
+    cliSessOpts.sessionP2Star = 0x01F4;
+    LoopbackEntity cliSess(cliSessOpts);
+    expect(cliSess.start(), "start cli session entity");
+    char sessArgs[256];
+    std::snprintf(sessArgs,
+                  sizeof(sessArgs),
+                  "session --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--session 0x01 --timeout-ms 1000",
+                  static_cast<unsigned>(cliSess.port()));
+    expect(run_cli(sessArgs, &exitCode, &output), "run cli session");
+    expect(exitCode == 0, "cli session exits 0");
+    expect(output.find("50 01") != std::string::npos, "cli prints raw 0x50 response");
+    expect(output.find("session_type=0x01") != std::string::npos, "cli prints session type");
+    expect(output.find("p2_ms=50") != std::string::npos, "cli prints P2");
+    expect(output.find("p2_star=0x01F4") != std::string::npos, "cli prints P2*");
+
+    char sessNrcArgs[256];
+    std::snprintf(sessNrcArgs,
+                  sizeof(sessNrcArgs),
+                  "session --ip 127.0.0.1 --port %u --tester-addr 0x0E00 "
+                  "--session 0x03 --timeout-ms 1000",
+                  static_cast<unsigned>(cliSess.port()));
+    expect(run_cli(sessNrcArgs, &exitCode, &output), "run cli session nrc");
+    expect(exitCode != 0, "cli unsupported session is non-zero");
+    expect(output.find("uds_nrc") != std::string::npos, "cli session mentions uds_nrc");
+    expect(output.find("0x12") != std::string::npos, "cli surfaces nrc 0x12");
+    cliSess.stop();
 
     LoopbackEntity::Options cliSilentOpts;
     cliSilentOpts.diagnosticMode = LoopbackEntity::DiagnosticMode::Silent;

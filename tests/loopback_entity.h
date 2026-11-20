@@ -39,6 +39,14 @@ public:
         uint16_t supportedDid = 0x0001;
         const char *didData = nullptr;
         bool rejectUnknownDid = false; // unknown 0x22 DID -> NRC 0x31
+        // Fake 0x10 DiagnosticSessionControl for tests (not a plant / OEM session).
+        // When rejectUnknownSession is set, only supportedSession is accepted (NRC 0x12 otherwise).
+        // When sessionIncludeTiming is set, a positive 0x50 includes P2 / P2* (on-wire units).
+        uint8_t supportedSession = 0x01;
+        bool rejectUnknownSession = false;
+        bool sessionIncludeTiming = false;
+        uint16_t sessionP2 = 0x0032;      // P2Server_max, milliseconds on the wire
+        uint16_t sessionP2Star = 0x01F4;  // P2*Server_max, 10 ms units on the wire
         uint32_t udsPendingCount = 0;  // number of 0x78 pendings to send first
         bool udsDropAfterPending = false;
         uint32_t udsPendingDelayMs = 20;

@@ -394,6 +394,35 @@ void LoopbackEntity::handle_diagnostic(const std::shared_ptr<Client> &client,
             }
         }
     }
+    else if (uds[0] == 0x10 &&
+             (options_.rejectUnknownSession || options_.sessionIncludeTiming))
+    {
+        if (udsLen < 2)
+        {
+            udsResp = {0x7F, 0x10, 0x13};
+        }
+        else
+        {
+            const uint8_t requested = uds[1];
+            const uint8_t type = static_cast<uint8_t>(requested & 0x7F);
+            if (options_.rejectUnknownSession &&
+                type != static_cast<uint8_t>(options_.supportedSession & 0x7F))
+            {
+                udsResp = {0x7F, 0x10, 0x12};
+            }
+            else
+            {
+                udsResp = {0x50, requested};
+                if (options_.sessionIncludeTiming)
+                {
+                    uint8_t timing[4];
+                    WriteU16Be(timing, options_.sessionP2);
+                    WriteU16Be(timing + 2, options_.sessionP2Star);
+                    udsResp.insert(udsResp.end(), timing, timing + 4);
+                }
+            }
+        }
+    }
 
     if (udsResp.empty())
     {
