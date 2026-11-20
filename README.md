@@ -115,9 +115,25 @@ ctest --test-dir build --output-on-failure
 
 回环模拟器会对示例 DID `0x0001` 返回可打印的假版本字符串 `SIM-1.0`（仅供本地联调，不是现场 DID）。默认模拟器对 UDS 0x10 / 0x3E / 0x11 / 0x31 在 suppressPositiveResponse（bit7）置位时保持静默；测试中也可配置仅接受某一会话类型、TesterPresent 子功能或例程 ID，或附带示例 P2/P2* 时序参数。
 
+## 公共 C API 示例
+
+可选目标（`-DDOIPLITE_BUILD_EXAMPLES=ON`，默认开启）构建两个可执行示例，仅使用公共 C API：
+
+- `doiplite-example-read-version`：发现 → 按配置身份唯一选设备 → 激活 → 读 `version_did`
+- `doiplite-example-flash-job`：默认干跑校验/打印刷写计划；加 `--execute` 才联网刷写（可擦写/复位 ECU）
+
+配置模板见 `examples/config/station_template.conf`；中文说明见 `examples/README_zh.md`。示例层配置解析不进入核心库。
+
+```bash
+cmake -S . -B build -G Ninja -DDOIPLITE_BUILD_EXAMPLES=ON -DDOIPLITE_BUILD_TESTS=ON
+# 离线 Asio：-DASIO_ROOT=/path/to/asio
+cmake --build build
+./build/doiplite-example-flash-job --config /path/to/your_station.conf
+```
+
 ## 配置与密钥
 
-现场 IP、例程 ID、内存地址、复位类型、会话类型、TesterPresent 子功能、保活间隔等**不要**写进库代码。`examples/config/example.conf` 仅含注释占位键名，请换成你自己的值，且不要提交真实现场配置。
+现场 IP、例程 ID、内存地址、复位类型、会话类型、TesterPresent 子功能、保活间隔等**不要**写进库代码。`examples/config/example.conf` 与 `examples/config/station_template.conf` 仅含注释占位键名，请换成你自己的值，且不要提交真实现场配置。
 
 UDS 安全访问的种子—密钥算法不在本库实现；`DoipLiteSetSeedKeyCallback` 可注册但刷写路径不会调用。详见 [SECURITY.md](SECURITY.md)。
 
